@@ -79,6 +79,13 @@ export async function sourceCandidatesForJob(jobOrId) {
       location: query.location,
       network_distance: query.network_distance || [1, 2],
     });
+    // eslint-disable-next-line no-await-in-loop
+    await logActivity(job.id, null, 'SEARCH_QUERY_EXECUTED', `Search "${query.keywords || 'Untitled query'}" returned ${(results || []).length} results`, {
+      keywords: query.keywords || null,
+      location: query.location || null,
+      network_distance: query.network_distance || [1, 2],
+      result_count: (results || []).length,
+    });
     for (const result of results || []) {
       const providerId = result.provider_id || result.id;
       if (providerId && !dedupe.has(providerId) && dedupe.size < 50) {
@@ -124,6 +131,13 @@ export async function sourceCandidatesForJob(jobOrId) {
 
   const hot = savedCandidates.filter((item) => item.fit_grade === 'HOT').length;
   const warm = savedCandidates.filter((item) => item.fit_grade === 'WARM').length;
+
+  if (!savedCandidates.length) {
+    await logActivity(job.id, null, 'SEARCH_PIPELINE_EMPTY', `No candidates were saved for ${job.job_title}`, {
+      attempted_queries: queries.slice(0, 3),
+      deduped_profiles: dedupe.size,
+    });
+  }
 
   await logActivity(job.id, null, 'CANDIDATES_SOURCED', `Sourced ${savedCandidates.length} candidates for ${job.job_title}`, {
     total: savedCandidates.length,

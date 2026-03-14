@@ -65,14 +65,74 @@ async function listAllWebhooks() {
   return items;
 }
 
+const SEARCH_PARAMETER_TYPES = {
+  industry: 'INDUSTRY',
+  location: 'LOCATION',
+  company: 'COMPANY',
+  past_company: 'COMPANY',
+  school: 'SCHOOL',
+  service: 'SERVICE',
+  connections_of: 'CONNECTIONS',
+  followers_of: 'PEOPLE',
+};
+
+function normalizeSearchValues(value) {
+  if (value == null) return [];
+  if (Array.isArray(value)) return value.map((item) => String(item || '').trim()).filter(Boolean);
+  return [String(value).trim()].filter(Boolean);
+}
+
+function isLikelyResolvedId(value) {
+  return /^[A-Za-z0-9:_-]{6,}$/.test(String(value || ''));
+}
+
+async function resolveSearchFilterParam(type, rawValue) {
+  const values = normalizeSearchValues(rawValue);
+  if (!values.length) return undefined;
+  if (values.every(isLikelyResolvedId)) return values;
+
+  const resolved = [];
+  for (const value of values) {
+    // eslint-disable-next-line no-await-in-loop
+    const matches = await getSearchParameters(type, value);
+    const exact = (matches || []).find((item) => String(item.title || '').toLowerCase() === value.toLowerCase());
+    const first = exact || matches?.[0];
+    if (first?.id) resolved.push(first.id);
+  }
+
+  return resolved.length ? resolved : undefined;
+}
+
+async function resolveSearchParams(params = {}) {
+  const payload = { ...params };
+
+  for (const [key, type] of Object.entries(SEARCH_PARAMETER_TYPES)) {
+    if (!(key in payload)) continue;
+    // eslint-disable-next-line no-await-in-loop
+    const resolved = await resolveSearchFilterParam(type, payload[key]);
+    if (resolved?.length) {
+      payload[key] = resolved;
+    } else {
+      delete payload[key];
+    }
+  }
+
+  if (payload.network_distance != null && !Array.isArray(payload.network_distance)) {
+    payload.network_distance = [Number(payload.network_distance)].filter(Boolean);
+  }
+
+  return payload;
+}
+
 export async function searchLinkedInPeople(params = {}) {
+  const resolvedParams = await resolveSearchParams(params);
   const result = await request('/linkedin/search', {
     method: 'POST',
     query: { account_id: linkedinAccountId },
     body: {
       api: 'classic',
       category: 'people',
-      ...params,
+      ...resolvedParams,
     },
   });
   return result?.items || result?.results || result?.profiles || result || [];
