@@ -28,7 +28,7 @@ function normaliseCandidate(profile, job, scoring, source = 'LinkedIn Search') {
     fit_score: scoring.fit_score,
     fit_grade: scoring.fit_grade,
     fit_rationale: scoring.fit_rationale,
-    pipeline_stage: scoring.fit_score >= 60 ? 'Shortlisted' : 'Sourced',
+    pipeline_stage: scoring.fit_score >= 60 ? 'Shortlisted' : scoring.fit_score >= 30 ? 'Sourced' : 'Archived',
     enrichment_status: 'Pending',
     source,
     notes: profile.headline || null,
@@ -127,12 +127,17 @@ export async function sourceCandidatesForJob(jobOrId) {
   for (const result of dedupe.values()) {
     // eslint-disable-next-line no-await-in-loop
     const profile = await getLinkedInProfile(result.provider_id || result.id);
-    if (!profile) continue;
+    const mergedProfile = profile ? { ...result, ...profile } : { ...result };
+    if (!profile) {
+      // eslint-disable-next-line no-await-in-loop
+      await logActivity(job.id, null, 'PROFILE_FALLBACK_USED', `Using search result only for ${result.name || result.full_name || result.id}`, {
+        provider_id: result.provider_id || result.id || null,
+      });
+    }
     // eslint-disable-next-line no-await-in-loop
-    const scoring = await scoreCandidateAgainstJob(profile, job);
-    if (scoring.fit_score < 30) continue;
+    const scoring = await scoreCandidateAgainstJob(mergedProfile, job);
 
-    const candidate = normaliseCandidate({ ...result, ...profile }, job, scoring);
+    const candidate = normaliseCandidate(mergedProfile, job, scoring);
     // eslint-disable-next-line no-await-in-loop
     const { data } = await supabase.from('candidates').upsert(candidate, {
       onConflict: 'job_id,linkedin_provider_id',
@@ -143,7 +148,7 @@ export async function sourceCandidatesForJob(jobOrId) {
       await logActivity(
         job.id,
         data.id,
-        data.pipeline_stage === 'Shortlisted' ? 'CANDIDATE_SHORTLISTED' : 'CANDIDATE_SOURCED',
+        data.pipeline_stage === 'Shortlisted' ? 'CANDIDATE_SHORTLISTED' : data.pipeline_stage === 'Archived' ? 'CANDIDATE_ARCHIVED' : 'CANDIDATE_SOURCED',
         `${data.name} scored ${data.fit_score || 0} (${data.fit_grade || 'UNKNOWN'}) for ${job.job_title}`,
         {
           fit_score: data.fit_score,

@@ -306,6 +306,18 @@
       '</tr>'
     )).join('') || '<tr><td colspan="4">No job assets yet.</td></tr>';
 
+    const settingsForm =
+      '<form id="job-settings-form" class="card form-grid" data-job-id="' + esc(job.id) + '">' +
+        '<div class="form-span-2"><div class="label-caps">Job Settings</div><h2 class="section-title">Per-Job Controls</h2></div>' +
+        '<label><span>Send from</span><input class="input" name="send_from" type="time" value="' + esc(job.send_from || '08:00') + '" /></label>' +
+        '<label><span>Send until</span><input class="input" name="send_until" type="time" value="' + esc(job.send_until || '18:00') + '" /></label>' +
+        '<label><span>Timezone</span><input class="input" name="timezone" value="' + esc(job.timezone || 'Europe/London') + '" /></label>' +
+        '<label><span>Active days</span><input class="input" name="active_days" value="' + esc(job.active_days || 'Mon,Tue,Wed,Thu,Fri') + '" /></label>' +
+        '<label><span>LinkedIn daily limit</span><input class="input" name="linkedin_daily_limit" type="number" value="' + esc(job.linkedin_daily_limit || 28) + '" /></label>' +
+        '<label><span>Status</span><input class="input" name="status" value="' + esc(job.status || 'ACTIVE') + '" readonly /></label>' +
+        '<div class="form-span-2 button-row"><button class="btn btn-primary" type="submit">Save Settings</button></div>' +
+      '</form>';
+
     const stageFilters = [
       ['all', 'All'],
       ['Shortlisted', 'Shortlisted'],
@@ -331,9 +343,12 @@
     let detailBody = '';
     if (state.jobsView === 'shortlist') {
       detailBody =
-        '<div class="table-card">' +
-          '<div class="panel-head"><div><div class="label-caps">Shortlist</div><h2 class="section-title">All Candidates for This Job</h2></div><div class="filters">' + stageFilters + '</div></div>' +
-          '<table><thead><tr><th>Candidate</th><th>Stage</th><th>Grade</th><th>Company</th><th>Score</th><th>Location</th><th></th></tr></thead><tbody>' + candidateRows + '</tbody></table>' +
+        '<div class="split">' +
+          '<div class="table-card">' +
+            '<div class="panel-head"><div><div class="label-caps">Shortlist</div><h2 class="section-title">All Candidates for This Job</h2></div><div class="filters">' + stageFilters + '</div></div>' +
+            '<table><thead><tr><th>Candidate</th><th>Stage</th><th>Grade</th><th>Company</th><th>Score</th><th>Location</th><th></th></tr></thead><tbody>' + candidateRows + '</tbody></table>' +
+          '</div>' +
+          settingsForm +
         '</div>';
     } else if (state.jobsView === 'activity') {
       detailBody =
@@ -364,9 +379,12 @@
             '<div class="panel-head"><div><div class="label-caps">Pipeline Snapshot</div><h2 class="section-title">Recent Candidates</h2></div><div class="filters">' + stageFilters + '</div></div>' +
             '<table><thead><tr><th>Candidate</th><th>Stage</th><th>Grade</th><th>Company</th><th>Score</th><th>Location</th><th></th></tr></thead><tbody>' + candidateRows + '</tbody></table>' +
           '</div>' +
-          '<div class="card">' +
+          '<div class="detail-stack">' +
+            settingsForm +
+            '<div class="card">' +
             '<div class="label-caps">Recent Activity</div><h2 class="section-title">Job Timeline</h2>' +
             '<div class="timeline push-top">' + activityRows + '</div>' +
+            '</div>' +
           '</div>' +
         '</div>';
     }
@@ -705,6 +723,26 @@
         await loadSelectedJob(jobId);
       } catch (error) {
         showToast(error.message.indexOf('job_assets') >= 0 ? 'Run the new Supabase migration 003_raxion_dashboard_assets.sql before using job assets.' : error.message, 'error');
+      }
+      return;
+    }
+
+    if (event.target.id === 'job-settings-form') {
+      event.preventDefault();
+      const jobId = event.target.dataset.jobId;
+      const payload = Object.fromEntries(new FormData(event.target).entries());
+      if (payload.linkedin_daily_limit) payload.linkedin_daily_limit = Number(payload.linkedin_daily_limit);
+      try {
+        await request('/api/jobs/' + jobId, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        showToast('Job settings saved.');
+        await loadCoreData({ preserveDrafts: true });
+        await loadSelectedJob(jobId, { preserveDrafts: true });
+      } catch (error) {
+        showToast(error.message, 'error');
       }
     }
   });
