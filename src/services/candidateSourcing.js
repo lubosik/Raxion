@@ -36,11 +36,40 @@ function normaliseCandidate(profile, job, scoring, source = 'LinkedIn Search') {
 }
 
 async function generateSearchQueries(job) {
-  return callClaude(
+  const generated = await callClaude(
     `Generate 3 LinkedIn people search query variations as JSON for this role.\nJob title: ${job.job_title}\nMust-have skills: ${job.tech_stack_must}\nLocation: ${job.location}\nSeniority: ${job.seniority_level}\nSector: ${job.sector}\nRemote policy: ${job.remote_policy}\nReturn {"queries":[{"keywords":"","location":"","network_distance":[1,2]}]}.`,
     'You generate precise LinkedIn recruiter search inputs. Return valid JSON only.',
     { expectJson: true },
   ).then((result) => result.queries || []).catch(() => []);
+
+  if (generated.length) return generated;
+
+  const baseTitle = job.job_title || job.name || 'Recruitment Consultant';
+  const mustHaves = String(job.tech_stack_must || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, 3);
+  const seniority = String(job.seniority_level || '').trim();
+  const location = String(job.location || '').trim();
+
+  return [
+    {
+      keywords: [seniority, baseTitle, ...mustHaves].filter(Boolean).join(' '),
+      location,
+      network_distance: [1, 2],
+    },
+    {
+      keywords: [baseTitle, ...mustHaves].filter(Boolean).join(' '),
+      location,
+      network_distance: [2, 3],
+    },
+    {
+      keywords: seniority && baseTitle ? `${seniority} ${baseTitle}` : baseTitle,
+      location,
+      network_distance: [1, 2, 3],
+    },
+  ];
 }
 
 export async function scoreCandidateAgainstJob(candidateProfile, job) {
