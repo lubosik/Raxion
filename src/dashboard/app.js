@@ -18,6 +18,7 @@
   const toastWrap = document.createElement('div');
   toastWrap.className = 'toast-wrap';
   document.body.appendChild(toastWrap);
+  let savedDrafts = {};
 
   function esc(value) {
     return String(value ?? '')
@@ -72,9 +73,62 @@
     return response.json();
   }
 
-  async function loadCoreData() {
-    state.loading = true;
-    render();
+  function serializeForm(form) {
+    if (!form) return null;
+    const payload = {};
+    Array.from(form.elements || []).forEach((field) => {
+      if (!field.name) return;
+      payload[field.name] = field.value;
+    });
+    return payload;
+  }
+
+  function captureDrafts() {
+    savedDrafts = {
+      createJob: serializeForm(document.getElementById('job-create-form')),
+      jobAsset: serializeForm(document.getElementById('job-asset-form')),
+    };
+  }
+
+  function restoreForm(formId, draft) {
+    const form = document.getElementById(formId);
+    if (!form || !draft) return;
+    Object.entries(draft).forEach(([name, value]) => {
+      const field = form.elements.namedItem(name);
+      if (!field || typeof value === 'undefined' || value === null) return;
+      field.value = value;
+    });
+  }
+
+  function restoreDrafts() {
+    restoreForm('job-create-form', savedDrafts.createJob);
+    restoreForm('job-asset-form', savedDrafts.jobAsset);
+  }
+
+  function hasMeaningfulDraft(formId) {
+    const form = document.getElementById(formId);
+    if (!form) return false;
+    return Array.from(form.elements || []).some((field) => field.name && String(field.value || '').trim() !== '');
+  }
+
+  function isEditingSensitiveView() {
+    const active = document.activeElement;
+    if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT')) {
+      return true;
+    }
+    if (state.view === 'jobs' && (hasMeaningfulDraft('job-create-form') || hasMeaningfulDraft('job-asset-form'))) {
+      return true;
+    }
+    return state.view === 'controls';
+  }
+
+  async function loadCoreData(options) {
+    const config = { background: false, preserveDrafts: false, ...options };
+    if (!config.background) {
+      state.loading = true;
+      render();
+    }
+
     const [stats, jobs, inbox, activity, approvals, runtime, health] = await Promise.all([
       request('/api/stats'),
       request('/api/jobs'),
@@ -94,13 +148,14 @@
     state.selectedJobId = state.selectedJobId || jobs[0]?.id || null;
     state.loading = false;
     if (state.selectedJobId) {
-      await loadSelectedJob(state.selectedJobId);
+      await loadSelectedJob(state.selectedJobId, { preserveDrafts: config.preserveDrafts });
     } else {
       render();
     }
   }
 
-  async function loadSelectedJob(jobId) {
+  async function loadSelectedJob(jobId, options) {
+    const config = { preserveDrafts: false, ...options };
     state.selectedJobId = jobId;
     if (!jobId) {
       state.selectedJobDetail = null;
@@ -114,7 +169,13 @@
     ]);
     state.selectedJobDetail = job;
     state.selectedJobCandidates = candidates;
+    if (config.preserveDrafts) {
+      captureDrafts();
+    }
     render();
+    if (config.preserveDrafts) {
+      restoreDrafts();
+    }
   }
 
   function renderOverview() {
@@ -365,6 +426,7 @@
   }
 
   function render() {
+    captureDrafts();
     setActiveNav();
     if (state.loading) {
       app.innerHTML = '<div class="card">Loading Mission Control…</div>';
@@ -382,6 +444,7 @@
 
     const view = views[state.view] || views.overview;
     app.innerHTML = view();
+    restoreDrafts();
   }
 
   async function handleAction(action, id, extra) {
@@ -448,7 +511,7 @@
     }
 
     if (event.target.id === 'refresh-dashboard') {
-      await loadCoreData();
+      await loadCoreData({ preserveDrafts: true });
       return;
     }
 
@@ -523,6 +586,7 @@
     app.innerHTML = '<div class="notice">Failed to load dashboard: ' + esc(error.message) + '</div>';
   });
   setInterval(() => {
-    loadCoreData().catch(() => null);
+    if (isEditingSensitiveView()) return;
+    loadCoreData({ background: true, preserveDrafts: true }).catch(() => null);
   }, 30000);
 }());
