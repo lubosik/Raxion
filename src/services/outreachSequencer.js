@@ -5,6 +5,7 @@ import { queueApproval } from './approvalService.js';
 import { logActivity } from './activityLogger.js';
 import { processEnrichmentQueue } from './enrichmentService.js';
 import { sourceCandidatesForJob } from './candidateSourcing.js';
+import { getRuntimeState } from './runtimeState.js';
 
 function todayIsoDate() {
   return new Date().toISOString().slice(0, 10);
@@ -157,15 +158,29 @@ async function checkStuckStages(job) {
   }
 }
 
-export async function processJob(job) {
-  await sendPendingConnectionRequests(job);
-  await sendPendingDMs(job);
-  await sendPendingEmails(job);
-  await sendPendingFollowUps(job);
+export async function processJob(job, runtimeState) {
+  if (runtimeState.linkedinEnabled && runtimeState.outreachEnabled) {
+    await sendPendingConnectionRequests(job);
+    await sendPendingDMs(job);
+  }
+
+  if (runtimeState.outreachEnabled) {
+    await sendPendingEmails(job);
+  }
+
+  if (runtimeState.followupEnabled) {
+    await sendPendingFollowUps(job);
+  }
+
   await checkStuckStages(job);
 }
 
 export async function runOrchestratorCycle() {
+  const runtimeState = await getRuntimeState();
+  if (runtimeState.raxionStatus !== 'ACTIVE' || runtimeState.outreachPausedUntil && new Date(runtimeState.outreachPausedUntil).getTime() > Date.now()) {
+    return { processed: 0, skipped: true };
+  }
+
   const { data: jobs } = await supabase.from('jobs').select('*').eq('status', 'ACTIVE');
   for (const job of jobs || []) {
     if (job.paused) continue;
@@ -173,17 +188,20 @@ export async function runOrchestratorCycle() {
       // eslint-disable-next-line no-await-in-loop
       const { count: sourcedCount } = await supabase.from('candidates').select('*', { count: 'exact', head: true }).eq('job_id', job.id).eq('pipeline_stage', 'Sourced');
       const cooldownMs = 24 * 60 * 60 * 1000;
-      if ((sourcedCount || 0) < 10 && (!job.last_research_at || Date.now() - new Date(job.last_research_at).getTime() > cooldownMs)) {
+      if (runtimeState.researchEnabled && (sourcedCount || 0) < 10 && (!job.last_research_at || Date.now() - new Date(job.last_research_at).getTime() > cooldownMs)) {
         // eslint-disable-next-line no-await-in-loop
         await sourceCandidatesForJob(job);
         // eslint-disable-next-line no-await-in-loop
         await supabase.from('jobs').update({ last_research_at: new Date().toISOString() }).eq('id', job.id);
       }
 
+      if (runtimeState.enrichmentEnabled) {
+        // eslint-disable-next-line no-await-in-loop
+        await processEnrichmentQueue(job.id);
+      }
+
       // eslint-disable-next-line no-await-in-loop
-      await processEnrichmentQueue(job.id);
-      // eslint-disable-next-line no-await-in-loop
-      await processJob(job);
+      await processJob(job, runtimeState);
     } catch (error) {
       // eslint-disable-next-line no-await-in-loop
       await logActivity(job.id, null, 'ORCHESTRATOR_ERROR', error.message, {});
