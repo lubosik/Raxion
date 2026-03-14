@@ -101,7 +101,23 @@ export async function sourceCandidatesForJob(jobOrId) {
     const { data } = await supabase.from('candidates').upsert(candidate, {
       onConflict: 'job_id,linkedin_provider_id',
     }).select('*').single();
-    if (data) savedCandidates.push(data);
+    if (data) {
+      savedCandidates.push(data);
+      // eslint-disable-next-line no-await-in-loop
+      await logActivity(
+        job.id,
+        data.id,
+        data.pipeline_stage === 'Shortlisted' ? 'CANDIDATE_SHORTLISTED' : 'CANDIDATE_SOURCED',
+        `${data.name} scored ${data.fit_score || 0} (${data.fit_grade || 'UNKNOWN'}) for ${job.job_title}`,
+        {
+          fit_score: data.fit_score,
+          fit_grade: data.fit_grade,
+          pipeline_stage: data.pipeline_stage,
+          current_title: data.current_title,
+          current_company: data.current_company,
+        },
+      );
+    }
     // eslint-disable-next-line no-await-in-loop
     await sleep(1500);
   }
