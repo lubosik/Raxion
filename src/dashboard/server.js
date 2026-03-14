@@ -30,6 +30,7 @@ function htmlPage() {
       <nav class="nav">
         <a class="nav-link active" href="#overview" data-view="overview"><span class="nav-icon">◈</span><span>Overview</span><span class="nav-dot"></span></a>
         <a class="nav-link" href="#jobs" data-view="jobs"><span class="nav-icon">◻</span><span>Jobs</span><span class="nav-dot"></span></a>
+        <a class="nav-link" href="#archived" data-view="archived"><span class="nav-icon">▤</span><span>Archived</span><span class="nav-dot"></span></a>
         <a class="nav-link" href="#inbox" data-view="inbox"><span class="nav-icon">◎</span><span>Inbox</span><span class="nav-dot"></span></a>
         <a class="nav-link" href="#activity" data-view="activity"><span class="nav-icon">◉</span><span>Activity</span><span class="nav-dot"></span></a>
         <a class="nav-link" href="#approvals" data-view="approvals"><span class="nav-icon">◷</span><span>Approvals</span><span class="nav-dot"></span></a>
@@ -170,6 +171,14 @@ export function createDashboardServer() {
   app.post('/api/jobs/:id/post-to-linkedin', async (req, res) => {
     const { data: job } = await supabase.from('jobs').select('*').eq('id', req.params.id).single();
     res.json(await postJobToLinkedIn(job));
+  });
+  app.post('/api/jobs/:id/source-now', async (req, res) => {
+    const { data: job } = await supabase.from('jobs').select('*').eq('id', req.params.id).single();
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    sourceCandidatesForJob(job).catch((error) => {
+      console.error('[dashboard] source-now failed', { jobId: job.id, error: error.message });
+    });
+    res.json({ started: true, job_id: job.id });
   });
   app.post('/api/jobs/:id/ingest-applicants', async (req, res) => {
     const { data: job } = await supabase.from('jobs').select('*').eq('id', req.params.id).single();

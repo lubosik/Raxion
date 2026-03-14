@@ -1,6 +1,7 @@
 (function () {
   const state = {
     view: (window.location.hash || '#overview').slice(1) || 'overview',
+    jobsView: 'overview',
     stats: null,
     jobs: [],
     inbox: [],
@@ -11,6 +12,7 @@
     selectedJobId: null,
     selectedJobDetail: null,
     selectedJobCandidates: [],
+    selectedJobStageFilter: 'all',
     loading: false,
   };
 
@@ -42,6 +44,14 @@
   function money(min, max, currency) {
     if (!min && !max) return '—';
     return [min || '—', max || '—'].join(' - ') + ' ' + (currency || 'GBP');
+  }
+
+  function getActiveJobs() {
+    return (state.jobs || []).filter((job) => job.status === 'ACTIVE' && !job.paused);
+  }
+
+  function getArchivedJobs() {
+    return (state.jobs || []).filter((job) => job.status !== 'ACTIVE' || job.paused);
   }
 
   function setActiveNav() {
@@ -145,7 +155,8 @@
     state.approvals = approvals;
     state.runtime = runtime;
     state.health = health;
-    state.selectedJobId = state.selectedJobId || jobs[0]?.id || null;
+    const activeJobs = jobs.filter((job) => job.status === 'ACTIVE' && !job.paused);
+    state.selectedJobId = state.selectedJobId || activeJobs[0]?.id || jobs[0]?.id || null;
     state.loading = false;
     if (state.selectedJobId) {
       await loadSelectedJob(state.selectedJobId, { preserveDrafts: config.preserveDrafts });
@@ -165,7 +176,7 @@
     }
     const [job, candidates] = await Promise.all([
       request('/api/jobs/' + jobId),
-      request('/api/jobs/' + jobId + '/candidates?limit=20'),
+      request('/api/jobs/' + jobId + '/candidates?limit=200' + (state.selectedJobStageFilter !== 'all' ? '&stage=' + encodeURIComponent(state.selectedJobStageFilter) : '')),
     ]);
     state.selectedJobDetail = job;
     state.selectedJobCandidates = candidates;
@@ -180,7 +191,7 @@
 
   function renderOverview() {
     const stats = state.stats || {};
-    const topJobs = state.jobs.slice(0, 5).map((job) => (
+    const topJobs = getActiveJobs().slice(0, 5).map((job) => (
       '<tr>' +
         '<td><strong>' + esc(job.job_title || job.name) + '</strong><div class="stat-note">' + esc(job.client_name || 'No client set') + '</div></td>' +
         '<td>' + badge(job.status) + '</td>' +
@@ -221,6 +232,27 @@
     );
   }
 
+  function renderArchived() {
+    const rows = getArchivedJobs().map((job) => (
+      '<tr>' +
+        '<td><strong>' + esc(job.job_title || job.name) + '</strong><div class="stat-note">' + esc(job.client_name || 'No client set') + '</div></td>' +
+        '<td>' + badge(job.status) + '</td>' +
+        '<td>' + time(job.closed_at || job.created_at) + '</td>' +
+        '<td>' + (job.metrics?.candidates_sourced || 0) + '</td>' +
+        '<td><button class="btn btn-secondary" data-action="select-job" data-job-id="' + esc(job.id) + '">Open</button></td>' +
+      '</tr>'
+    )).join('') || '<tr><td colspan="5">No archived jobs yet.</td></tr>';
+
+    return (
+      '<section class="view-section">' +
+        '<div class="table-card">' +
+          '<div class="panel-head"><div><div class="label-caps">Archived Jobs</div><h2 class="section-title">Closed and Paused Searches</h2></div></div>' +
+          '<table><thead><tr><th>Job</th><th>Status</th><th>Closed</th><th>Sourced</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>' +
+        '</div>' +
+      '</section>'
+    );
+  }
+
   function renderJobForm() {
     return (
       '<form id="job-create-form" class="card form-grid">' +
@@ -256,9 +288,10 @@
         '<td>' + badge(candidate.fit_grade || 'Unknown') + '</td>' +
         '<td>' + esc(candidate.current_company || '—') + '</td>' +
         '<td>' + (candidate.fit_score || 0) + '</td>' +
+        '<td>' + esc(candidate.location || '—') + '</td>' +
         '<td><a class="btn btn-secondary" target="_blank" rel="noreferrer" href="' + esc(candidate.linkedin_url || '#') + '">LinkedIn</a></td>' +
       '</tr>'
-    )).join('') || '<tr><td colspan="6">No candidates loaded yet.</td></tr>';
+    )).join('') || '<tr><td colspan="7">No candidates loaded yet.</td></tr>';
 
     const activityRows = (job.recent_activity || []).map((item) => (
       '<div class="timeline-item"><div class="timeline-meta">' + time(item.created_at) + '</div><div><strong>' + esc(item.event_type) + '</strong> · ' + esc(item.summary || '') + '</div></div>'
@@ -273,29 +306,43 @@
       '</tr>'
     )).join('') || '<tr><td colspan="4">No job assets yet.</td></tr>';
 
-    return (
-      '<div class="detail-stack">' +
+    const stageFilters = [
+      ['all', 'All'],
+      ['Shortlisted', 'Shortlisted'],
+      ['Enriched', 'Enriched'],
+      ['invite_sent', 'Invited'],
+      ['invite_accepted', 'Accepted'],
+      ['Qualified', 'Qualified'],
+      ['Replied', 'Replied'],
+      ['Archived', 'Archived'],
+    ].map(([value, label]) => (
+      '<button class="btn filter-pill ' + (state.selectedJobStageFilter === value ? 'active' : '') + '" data-action="set-stage-filter" data-stage="' + esc(value) + '">' + esc(label) + '</button>'
+    )).join('');
+
+    const jobSubnav = [
+      ['overview', 'Overview'],
+      ['shortlist', 'Shortlist'],
+      ['activity', 'Activity'],
+      ['assets', 'Assets'],
+    ].map(([value, label]) => (
+      '<button class="btn filter-pill ' + (state.jobsView === value ? 'active' : '') + '" data-action="set-job-view" data-job-view="' + esc(value) + '">' + esc(label) + '</button>'
+    )).join('');
+
+    let detailBody = '';
+    if (state.jobsView === 'shortlist') {
+      detailBody =
+        '<div class="table-card">' +
+          '<div class="panel-head"><div><div class="label-caps">Shortlist</div><h2 class="section-title">All Candidates for This Job</h2></div><div class="filters">' + stageFilters + '</div></div>' +
+          '<table><thead><tr><th>Candidate</th><th>Stage</th><th>Grade</th><th>Company</th><th>Score</th><th>Location</th><th></th></tr></thead><tbody>' + candidateRows + '</tbody></table>' +
+        '</div>';
+    } else if (state.jobsView === 'activity') {
+      detailBody =
         '<div class="card">' +
-          '<div class="label-caps">Selected Job</div><h2 class="section-title">' + esc(job.job_title || job.name) + '</h2>' +
-          '<div class="stat-note">' + esc(job.client_name || 'No client set') + ' · ' + esc(job.location || 'No location') + ' · ' + money(job.salary_min, job.salary_max, job.currency) + '</div>' +
-          '<div class="stat-note">Send window: ' + esc(job.send_from || '08:00') + ' - ' + esc(job.send_until || '18:00') + ' · ' + esc(job.timezone || 'Europe/London') + ' · ' + esc(job.active_days || 'Mon,Tue,Wed,Thu,Fri') + '</div>' +
-          '<div class="grid grid-4 push-top">' +
-            '<div class="card card-tight"><div class="label-caps">Sourced</div><div class="stat-value">' + (job.metrics?.candidates_sourced || 0) + '</div></div>' +
-            '<div class="card card-tight"><div class="label-caps">Outreach</div><div class="stat-value">' + (job.metrics?.candidates_in_outreach || 0) + '</div></div>' +
-            '<div class="card card-tight"><div class="label-caps">Replies</div><div class="stat-value">' + (job.metrics?.replies || 0) + '</div></div>' +
-            '<div class="card card-tight"><div class="label-caps">Approvals</div><div class="stat-value">' + (job.metrics?.approval_queue_count || 0) + '</div></div>' +
-          '</div>' +
-        '</div>' +
-        '<div class="split">' +
-          '<div class="table-card">' +
-            '<div class="panel-head"><div><div class="label-caps">Pipeline</div><h2 class="section-title">Top Candidates</h2></div></div>' +
-            '<table><thead><tr><th>Candidate</th><th>Stage</th><th>Grade</th><th>Company</th><th>Score</th><th></th></tr></thead><tbody>' + candidateRows + '</tbody></table>' +
-          '</div>' +
-          '<div class="card">' +
-            '<div class="label-caps">Recent Activity</div><h2 class="section-title">Job Timeline</h2>' +
-            '<div class="timeline push-top">' + activityRows + '</div>' +
-          '</div>' +
-        '</div>' +
+          '<div class="label-caps">Recent Activity</div><h2 class="section-title">Job Timeline</h2>' +
+          '<div class="timeline push-top">' + activityRows + '</div>' +
+        '</div>';
+    } else if (state.jobsView === 'assets') {
+      detailBody =
         '<div class="split">' +
           '<div class="table-card">' +
             '<div class="panel-head"><div><div class="label-caps">Assets</div><h2 class="section-title">Reply Links</h2></div></div>' +
@@ -309,13 +356,47 @@
             '<label class="form-span-2"><span>Description</span><textarea class="input textarea" name="description"></textarea></label>' +
             '<div class="form-span-2 button-row"><button class="btn btn-primary" type="submit">Save Asset</button></div>' +
           '</form>' +
+        '</div>';
+    } else {
+      detailBody =
+        '<div class="split">' +
+          '<div class="table-card">' +
+            '<div class="panel-head"><div><div class="label-caps">Pipeline Snapshot</div><h2 class="section-title">Recent Candidates</h2></div><div class="filters">' + stageFilters + '</div></div>' +
+            '<table><thead><tr><th>Candidate</th><th>Stage</th><th>Grade</th><th>Company</th><th>Score</th><th>Location</th><th></th></tr></thead><tbody>' + candidateRows + '</tbody></table>' +
+          '</div>' +
+          '<div class="card">' +
+            '<div class="label-caps">Recent Activity</div><h2 class="section-title">Job Timeline</h2>' +
+            '<div class="timeline push-top">' + activityRows + '</div>' +
+          '</div>' +
+        '</div>';
+    }
+
+    return (
+      '<div class="detail-stack">' +
+        '<div class="card">' +
+          '<div class="label-caps">Selected Job</div><h2 class="section-title">' + esc(job.job_title || job.name) + '</h2>' +
+          '<div class="stat-note">' + esc(job.client_name || 'No client set') + ' · ' + esc(job.location || 'No location') + ' · ' + money(job.salary_min, job.salary_max, job.currency) + '</div>' +
+          '<div class="stat-note">Send window: ' + esc(job.send_from || '08:00') + ' - ' + esc(job.send_until || '18:00') + ' · ' + esc(job.timezone || 'Europe/London') + ' · ' + esc(job.active_days || 'Mon,Tue,Wed,Thu,Fri') + '</div>' +
+          '<div class="button-row push-top">' +
+            '<button class="btn btn-primary" data-action="source-now" data-job-id="' + esc(job.id) + '">Source Now</button>' +
+            (job.status === 'ACTIVE' ? '<button class="btn btn-secondary" data-action="close-job" data-job-id="' + esc(job.id) + '">Close Job</button>' : '') +
+            '<button class="btn btn-secondary" data-action="delete-job" data-job-id="' + esc(job.id) + '">Delete Job</button>' +
+          '</div>' +
+          '<div class="grid grid-4 push-top">' +
+            '<div class="card card-tight"><div class="label-caps">Sourced</div><div class="stat-value">' + (job.metrics?.candidates_sourced || 0) + '</div></div>' +
+            '<div class="card card-tight"><div class="label-caps">Outreach</div><div class="stat-value">' + (job.metrics?.candidates_in_outreach || 0) + '</div></div>' +
+            '<div class="card card-tight"><div class="label-caps">Replies</div><div class="stat-value">' + (job.metrics?.replies || 0) + '</div></div>' +
+            '<div class="card card-tight"><div class="label-caps">Approvals</div><div class="stat-value">' + (job.metrics?.approval_queue_count || 0) + '</div></div>' +
+          '</div>' +
+          '<div class="filters push-top">' + jobSubnav + '</div>' +
         '</div>' +
+        detailBody +
       '</div>'
     );
   }
 
   function renderJobs() {
-    const jobRows = state.jobs.map((job) => (
+    const jobRows = getActiveJobs().map((job) => (
       '<tr>' +
         '<td><strong>' + esc(job.job_title || job.name) + '</strong><div class="stat-note">' + esc(job.client_name || 'No client set') + '</div></td>' +
         '<td>' + badge(job.status) + '</td>' +
@@ -441,6 +522,7 @@
     const views = {
       overview: renderOverview,
       jobs: renderJobs,
+      archived: renderArchived,
       inbox: renderInbox,
       activity: renderActivity,
       approvals: renderApprovals,
@@ -491,6 +573,54 @@
     if (action === 'delete-asset') {
       await request('/api/jobs/' + state.selectedJobId + '/assets/' + id, { method: 'DELETE' });
       await loadSelectedJob(state.selectedJobId);
+      return;
+    }
+
+    if (action === 'set-job-view') {
+      state.jobsView = extra;
+      render();
+      return;
+    }
+
+    if (action === 'set-stage-filter') {
+      state.selectedJobStageFilter = extra;
+      await loadSelectedJob(state.selectedJobId, { preserveDrafts: true });
+      return;
+    }
+
+    if (action === 'source-now') {
+      await request('/api/jobs/' + id + '/source-now', { method: 'POST' });
+      showToast('Sourcing triggered. Watch the shortlist and live activity feed.');
+      state.jobsView = 'shortlist';
+      await loadCoreData({ preserveDrafts: true });
+      await loadSelectedJob(id, { preserveDrafts: true });
+      return;
+    }
+
+    if (action === 'close-job') {
+      await request('/api/jobs/' + id + '/close', { method: 'POST' });
+      showToast('Job closed. No further action will run for it.');
+      state.view = 'archived';
+      window.location.hash = 'archived';
+      await loadCoreData({ preserveDrafts: true });
+      return;
+    }
+
+    if (action === 'delete-job') {
+      const confirmed = window.confirm('Delete this job and all related candidates from Mission Control and Supabase?');
+      if (!confirmed) return;
+      await request('/api/jobs/' + id, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm: true }),
+      });
+      showToast('Job and related candidates deleted.');
+      if (state.selectedJobId === id) {
+        state.selectedJobId = null;
+        state.selectedJobDetail = null;
+        state.selectedJobCandidates = [];
+      }
+      await loadCoreData({ preserveDrafts: true });
     }
   }
 
@@ -508,7 +638,11 @@
     if (actionEl) {
       event.preventDefault();
       try {
-        await handleAction(actionEl.dataset.action, actionEl.dataset.id || actionEl.dataset.jobId || actionEl.dataset.assetId, actionEl.dataset.key);
+        await handleAction(
+          actionEl.dataset.action,
+          actionEl.dataset.id || actionEl.dataset.jobId || actionEl.dataset.assetId,
+          actionEl.dataset.key || actionEl.dataset.jobView || actionEl.dataset.stage,
+        );
       } catch (error) {
         showToast(error.message, 'error');
       }
@@ -545,6 +679,8 @@
           body: JSON.stringify(payload),
         });
         event.target.reset();
+        state.jobsView = 'overview';
+        state.selectedJobStageFilter = 'all';
         await loadCoreData();
         await loadSelectedJob(result.job_id);
         state.view = 'jobs';
