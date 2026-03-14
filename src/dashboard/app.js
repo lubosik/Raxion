@@ -297,15 +297,16 @@
 
     const candidateRows = state.selectedJobCandidates.map((candidate) => (
       '<tr>' +
-        '<td><strong>' + esc(candidate.name || 'Unknown') + '</strong><div class="stat-note">' + esc(candidate.current_title || 'No title') + '</div></td>' +
+        '<td><strong>' + esc(candidate.name || 'Unknown') + '</strong><div class="stat-note">' + esc(candidate.current_title || candidate.headline || 'No title') + '</div><div class="stat-note">' + esc(candidate.linkedin_url || 'No LinkedIn URL') + '</div></td>' +
         '<td>' + badge(candidate.pipeline_stage) + '</td>' +
         '<td>' + badge(candidate.fit_grade || 'Unknown') + '</td>' +
         '<td>' + esc(candidate.current_company || '—') + '</td>' +
         '<td>' + (candidate.fit_score || 0) + '</td>' +
         '<td>' + esc(candidate.location || '—') + '</td>' +
+        '<td><div class="candidate-meta"><div><strong>Why:</strong> ' + esc(candidate.fit_rationale || candidate.score_reason || 'No rationale captured') + '</div><div><strong>Notes:</strong> ' + esc(candidate.notes || candidate.tech_skills || 'No notes captured') + '</div></div></td>' +
         '<td><a class="btn btn-secondary" target="_blank" rel="noreferrer" href="' + esc(candidate.linkedin_url || '#') + '">LinkedIn</a></td>' +
       '</tr>'
-    )).join('') || '<tr><td colspan="7">No candidates loaded yet.</td></tr>';
+    )).join('') || '<tr><td colspan="8">No candidates loaded yet.</td></tr>';
 
     const activityRows = (job.recent_activity || []).map((item) => (
       '<div class="timeline-item"><div class="timeline-meta">' + time(item.created_at) + '</div><div><strong>' + esc(item.event_type) + '</strong> · ' + esc(item.summary || '') + '</div></div>'
@@ -371,7 +372,7 @@
         '<div class="split">' +
           '<div class="table-card">' +
             '<div class="panel-head"><div><div class="label-caps">Shortlist</div><h2 class="section-title">All Candidates for This Job</h2></div><div class="filters">' + stageFilters + '</div></div>' +
-            '<table><thead><tr><th>Candidate</th><th>Stage</th><th>Grade</th><th>Company</th><th>Score</th><th>Location</th><th></th></tr></thead><tbody>' + candidateRows + '</tbody></table>' +
+            '<table><thead><tr><th>Candidate</th><th>Stage</th><th>Grade</th><th>Company</th><th>Score</th><th>Location</th><th>Rationale</th><th></th></tr></thead><tbody>' + candidateRows + '</tbody></table>' +
           '</div>' +
           settingsForm +
         '</div>';
@@ -404,7 +405,7 @@
         '<div class="split">' +
           '<div class="table-card">' +
             '<div class="panel-head"><div><div class="label-caps">Pipeline Snapshot</div><h2 class="section-title">Recent Candidates</h2></div><div class="filters">' + stageFilters + '</div></div>' +
-            '<table><thead><tr><th>Candidate</th><th>Stage</th><th>Grade</th><th>Company</th><th>Score</th><th>Location</th><th></th></tr></thead><tbody>' + candidateRows + '</tbody></table>' +
+            '<table><thead><tr><th>Candidate</th><th>Stage</th><th>Grade</th><th>Company</th><th>Score</th><th>Location</th><th>Rationale</th><th></th></tr></thead><tbody>' + candidateRows + '</tbody></table>' +
           '</div>' +
           '<div class="detail-stack">' +
             settingsForm +

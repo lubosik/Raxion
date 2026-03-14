@@ -79,6 +79,28 @@ export async function scoreCandidateAgainstJob(candidateProfile, job) {
     { expectJson: true },
   ).catch(() => null);
 
+  if (!result) {
+    const haystack = [
+      candidateProfile.current_title,
+      candidateProfile.headline,
+      candidateProfile.current_company,
+      candidateProfile.skills,
+      candidateProfile.tech_skills,
+      candidateProfile.summary,
+    ].join(' ').toLowerCase();
+    const titleTerms = String(job.job_title || '').toLowerCase().split(/\s+/).filter((item) => item.length > 3);
+    const skillTerms = String(job.tech_stack_must || '').toLowerCase().split(',').map((item) => item.trim()).filter(Boolean);
+    const titleMatches = titleTerms.filter((term) => haystack.includes(term)).length;
+    const skillMatches = skillTerms.filter((term) => haystack.includes(term)).length;
+    const heuristicScore = Math.min(85, (titleMatches * 18) + (skillMatches * 14));
+    const heuristicGrade = heuristicScore >= 80 ? 'HOT' : heuristicScore >= 60 ? 'WARM' : heuristicScore >= 40 ? 'POSSIBLE' : 'ARCHIVE';
+    return {
+      fit_score: heuristicScore,
+      fit_grade: heuristicGrade,
+      fit_rationale: heuristicScore ? `Heuristic fallback score based on title/skill matches (${titleMatches} title, ${skillMatches} skill)` : 'Heuristic fallback found no meaningful title or skill overlap',
+    };
+  }
+
   const fitScore = Math.max(0, Math.min(100, Math.round(Number(result?.fit_score || 0))));
   const fitGrade = fitScore >= 80 ? 'HOT' : fitScore >= 60 ? 'WARM' : fitScore >= 40 ? 'POSSIBLE' : 'ARCHIVE';
   return {

@@ -140,7 +140,11 @@ export async function searchLinkedInPeople(params = {}) {
 
 export async function getLinkedInProfile(providerId) {
   return request(`/users/${encodeURIComponent(providerId)}`, {
-    query: { account_id: linkedinAccountId },
+    query: {
+      account_id: linkedinAccountId,
+      linkedin_sections: '*_preview,skills,experience',
+      notify: false,
+    },
   });
 }
 
