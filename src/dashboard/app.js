@@ -22,6 +22,16 @@
   document.body.appendChild(toastWrap);
   let savedDrafts = {};
 
+  function parseTemplates(rawTemplates) {
+    if (!rawTemplates) return {};
+    if (typeof rawTemplates === 'object') return rawTemplates;
+    try {
+      return JSON.parse(rawTemplates);
+    } catch (error) {
+      return {};
+    }
+  }
+
   function esc(value) {
     return String(value ?? '')
       .replaceAll('&', '&amp;')
@@ -97,6 +107,8 @@
     savedDrafts = {
       createJob: serializeForm(document.getElementById('job-create-form')),
       jobAsset: serializeForm(document.getElementById('job-asset-form')),
+      jobSettings: serializeForm(document.getElementById('job-settings-form')),
+      jobTemplates: serializeForm(document.getElementById('job-templates-form')),
     };
   }
 
@@ -113,6 +125,8 @@
   function restoreDrafts() {
     restoreForm('job-create-form', savedDrafts.createJob);
     restoreForm('job-asset-form', savedDrafts.jobAsset);
+    restoreForm('job-settings-form', savedDrafts.jobSettings);
+    restoreForm('job-templates-form', savedDrafts.jobTemplates);
   }
 
   function hasMeaningfulDraft(formId) {
@@ -126,7 +140,7 @@
     if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT')) {
       return true;
     }
-    if (state.view === 'jobs' && (hasMeaningfulDraft('job-create-form') || hasMeaningfulDraft('job-asset-form'))) {
+    if (state.view === 'jobs' && (hasMeaningfulDraft('job-create-form') || hasMeaningfulDraft('job-asset-form') || hasMeaningfulDraft('job-settings-form') || hasMeaningfulDraft('job-templates-form'))) {
       return true;
     }
     return state.view === 'controls';
@@ -305,6 +319,7 @@
         '<td><button class="btn btn-secondary" data-action="delete-asset" data-asset-id="' + esc(asset.id) + '">Remove</button></td>' +
       '</tr>'
     )).join('') || '<tr><td colspan="4">No job assets yet.</td></tr>';
+    const templates = parseTemplates(job.outreach_templates);
 
     const settingsForm =
       '<form id="job-settings-form" class="card form-grid" data-job-id="' + esc(job.id) + '">' +
@@ -316,6 +331,15 @@
         '<label><span>LinkedIn daily limit</span><input class="input" name="linkedin_daily_limit" type="number" value="' + esc(job.linkedin_daily_limit || 28) + '" /></label>' +
         '<label><span>Status</span><input class="input" name="status" value="' + esc(job.status || 'ACTIVE') + '" readonly /></label>' +
         '<div class="form-span-2 button-row"><button class="btn btn-primary" type="submit">Save Settings</button></div>' +
+      '</form>';
+    const templatesForm =
+      '<form id="job-templates-form" class="card form-grid" data-job-id="' + esc(job.id) + '">' +
+        '<div class="form-span-2"><div class="label-caps">Templates</div><h2 class="section-title">Per-Job Outreach Guidance</h2></div>' +
+        '<label class="form-span-2"><span>Connection request template guidance</span><textarea class="input textarea" name="connection_request" placeholder="Tone, CTA, hooks, constraints">' + esc(templates.connection_request || '') + '</textarea></label>' +
+        '<label class="form-span-2"><span>LinkedIn DM template guidance</span><textarea class="input textarea" name="linkedin_dm" placeholder="How the first DM should sound for this job">' + esc(templates.linkedin_dm || '') + '</textarea></label>' +
+        '<label class="form-span-2"><span>Email template guidance</span><textarea class="input textarea" name="email" placeholder="How outreach emails should be framed for this job">' + esc(templates.email || '') + '</textarea></label>' +
+        '<label class="form-span-2"><span>Follow-up template guidance</span><textarea class="input textarea" name="follow_up" placeholder="How follow-ups should sound for this job">' + esc(templates.follow_up || '') + '</textarea></label>' +
+        '<div class="form-span-2 button-row"><button class="btn btn-primary" type="submit">Save Templates</button></div>' +
       '</form>';
 
     const stageFilters = [
@@ -336,6 +360,7 @@
       ['shortlist', 'Shortlist'],
       ['activity', 'Activity'],
       ['assets', 'Assets'],
+      ['templates', 'Templates'],
     ].map(([value, label]) => (
       '<button class="btn filter-pill ' + (state.jobsView === value ? 'active' : '') + '" data-action="set-job-view" data-job-view="' + esc(value) + '">' + esc(label) + '</button>'
     )).join('');
@@ -372,6 +397,8 @@
             '<div class="form-span-2 button-row"><button class="btn btn-primary" type="submit">Save Asset</button></div>' +
           '</form>' +
         '</div>';
+    } else if (state.jobsView === 'templates') {
+      detailBody = templatesForm;
     } else {
       detailBody =
         '<div class="split">' +
@@ -739,6 +766,25 @@
           body: JSON.stringify(payload),
         });
         showToast('Job settings saved.');
+        await loadCoreData({ preserveDrafts: true });
+        await loadSelectedJob(jobId, { preserveDrafts: true });
+      } catch (error) {
+        showToast(error.message, 'error');
+      }
+      return;
+    }
+
+    if (event.target.id === 'job-templates-form') {
+      event.preventDefault();
+      const jobId = event.target.dataset.jobId;
+      const rawTemplates = Object.fromEntries(new FormData(event.target).entries());
+      try {
+        await request('/api/jobs/' + jobId, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ outreach_templates: rawTemplates }),
+        });
+        showToast('Job templates saved.');
         await loadCoreData({ preserveDrafts: true });
         await loadSelectedJob(jobId, { preserveDrafts: true });
       } catch (error) {

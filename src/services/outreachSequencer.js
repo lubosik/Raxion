@@ -7,6 +7,7 @@ import { processEnrichmentQueue } from './enrichmentService.js';
 import { sourceCandidatesForJob } from './candidateSourcing.js';
 import { getRuntimeState } from './runtimeState.js';
 import { isWithinSendingWindow } from './scheduleService.js';
+import { buildTemplateAwarePrompt } from './outreachTemplates.js';
 
 function todayIsoDate() {
   return new Date().toISOString().slice(0, 10);
@@ -41,7 +42,7 @@ export async function sendPendingConnectionRequests(job) {
 
   for (const candidate of candidates || []) {
     // eslint-disable-next-line no-await-in-loop
-    const message = await draftMessage(`Write a LinkedIn connection request under 300 characters.\nCandidate: ${candidate.name}, ${candidate.current_title} at ${candidate.current_company}\nJob: ${job.job_title} at ${job.client_name}\nUse one specific hook from this profile: ${candidate.notes || candidate.tech_skills || candidate.current_company}.`);
+    const message = await draftMessage(buildTemplateAwarePrompt(job, 'connection_request', `Write a LinkedIn connection request under 300 characters.\nCandidate: ${candidate.name}, ${candidate.current_title} at ${candidate.current_company}\nJob: ${job.job_title} at ${job.client_name}\nUse one specific hook from this profile: ${candidate.notes || candidate.tech_skills || candidate.current_company}.`));
     if (!message) continue;
     // eslint-disable-next-line no-await-in-loop
     await queueApproval({ candidateId: candidate.id, jobId: job.id, channel: 'connection_request', stage: 'invite_sent', messageText: message.slice(0, 300) });
@@ -65,7 +66,7 @@ export async function sendPendingDMs(job) {
 
   for (const candidate of candidates || []) {
     // eslint-disable-next-line no-await-in-loop
-    const message = await draftMessage(`Write a personalized LinkedIn DM.\nCandidate: ${JSON.stringify(candidate)}\nJob: ${JSON.stringify(job)}\nReference something specific from their profile and mention salary if present.`);
+    const message = await draftMessage(buildTemplateAwarePrompt(job, 'linkedin_dm', `Write a personalized LinkedIn DM.\nCandidate: ${JSON.stringify(candidate)}\nJob: ${JSON.stringify(job)}\nReference something specific from their profile and mention salary if present.`));
     if (!message) continue;
     // eslint-disable-next-line no-await-in-loop
     await queueApproval({ candidateId: candidate.id, jobId: job.id, channel: 'linkedin_dm', stage: 'dm_sent', messageText: message });
@@ -86,7 +87,7 @@ export async function sendPendingEmails(job) {
 
   for (const candidate of candidates || []) {
     // eslint-disable-next-line no-await-in-loop
-    const message = await draftMessage(`Write a longer-form recruiting email.\nCandidate: ${JSON.stringify(candidate)}\nJob: ${JSON.stringify(job)}\nInclude role, client, salary, and why the role is interesting.`);
+    const message = await draftMessage(buildTemplateAwarePrompt(job, 'email', `Write a longer-form recruiting email.\nCandidate: ${JSON.stringify(candidate)}\nJob: ${JSON.stringify(job)}\nInclude role, client, salary, and why the role is interesting.`));
     if (!message) continue;
     // eslint-disable-next-line no-await-in-loop
     await queueApproval({ candidateId: candidate.id, jobId: job.id, channel: 'email', stage: 'email_sent', messageText: message });
@@ -119,7 +120,7 @@ export async function sendPendingFollowUps(job) {
     }
 
     // eslint-disable-next-line no-await-in-loop
-    const message = await draftMessage(`Write a brief recruiter follow-up. Candidate has not replied yet.\nCandidate: ${JSON.stringify(candidate)}\nJob: ${JSON.stringify(job)}`);
+    const message = await draftMessage(buildTemplateAwarePrompt(job, 'follow_up', `Write a brief recruiter follow-up. Candidate has not replied yet.\nCandidate: ${JSON.stringify(candidate)}\nJob: ${JSON.stringify(job)}`));
     if (!message) continue;
     // eslint-disable-next-line no-await-in-loop
     await queueApproval({
