@@ -166,6 +166,12 @@ export async function startLinkedInDM(providerId, message) {
   });
 }
 
+export async function getChat(chatId) {
+  return request(`/chats/${encodeURIComponent(chatId)}`, {
+    query: { account_id: linkedinAccountId },
+  });
+}
+
 export async function sendLinkedInDM(chatId, message) {
   return request(`/chats/${encodeURIComponent(chatId)}/messages`, {
     method: 'POST',
@@ -201,6 +207,32 @@ export async function sendEmail(toEmail, toName, subject, body, replyToMessageId
     method: 'POST',
     body: form,
     isMultipart: true,
+  });
+}
+
+export async function getEmail(emailId) {
+  return request(`/emails/${encodeURIComponent(emailId)}`, {
+    query: emailAccountId ? { account_id: emailAccountId } : undefined,
+  });
+}
+
+export async function downloadEmailAttachment(emailId, attachmentId) {
+  return request(`/emails/${encodeURIComponent(emailId)}/attachments/${encodeURIComponent(attachmentId)}`, {
+    query: emailAccountId ? { account_id: emailAccountId } : undefined,
+    returnBuffer: true,
+  });
+}
+
+export async function createPost({ text, includeJobPosting, externalLink, asOrganization } = {}) {
+  return request('/posts', {
+    method: 'POST',
+    body: {
+      account_id: linkedinAccountId,
+      text: text || '',
+      ...(includeJobPosting ? { include_job_posting: includeJobPosting } : {}),
+      ...(externalLink ? { external_link: externalLink } : {}),
+      ...(asOrganization ? { as_organization: asOrganization } : {}),
+    },
   });
 }
 

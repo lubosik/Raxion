@@ -231,6 +231,10 @@
         '<label><span>Seniority</span><input class="input" name="seniority_level" /></label>' +
         '<label><span>Salary min</span><input class="input" name="salary_min" type="number" /></label>' +
         '<label><span>Salary max</span><input class="input" name="salary_max" type="number" /></label>' +
+        '<label><span>Send from</span><input class="input" name="send_from" type="time" value="08:00" /></label>' +
+        '<label><span>Send until</span><input class="input" name="send_until" type="time" value="18:00" /></label>' +
+        '<label><span>Timezone</span><input class="input" name="timezone" value="Europe/London" /></label>' +
+        '<label><span>Active days</span><input class="input" name="active_days" value="Mon,Tue,Wed,Thu,Fri" /></label>' +
         '<label class="form-span-2"><span>Must-have stack</span><input class="input" name="tech_stack_must" placeholder="Node.js, TypeScript, PostgreSQL" /></label>' +
         '<label class="form-span-2"><span>Candidate profile</span><textarea class="input textarea" name="candidate_profile" placeholder="Who are we targeting and why?"></textarea></label>' +
         '<label class="form-span-2"><span>Full job description</span><textarea class="input textarea" name="full_job_description" placeholder="Paste the brief or core hiring context"></textarea></label>' +
@@ -274,6 +278,7 @@
         '<div class="card">' +
           '<div class="label-caps">Selected Job</div><h2 class="section-title">' + esc(job.job_title || job.name) + '</h2>' +
           '<div class="stat-note">' + esc(job.client_name || 'No client set') + ' · ' + esc(job.location || 'No location') + ' · ' + money(job.salary_min, job.salary_max, job.currency) + '</div>' +
+          '<div class="stat-note">Send window: ' + esc(job.send_from || '08:00') + ' - ' + esc(job.send_until || '18:00') + ' · ' + esc(job.timezone || 'Europe/London') + ' · ' + esc(job.active_days || 'Mon,Tue,Wed,Thu,Fri') + '</div>' +
           '<div class="grid grid-4 push-top">' +
             '<div class="card card-tight"><div class="label-caps">Sourced</div><div class="stat-value">' + (job.metrics?.candidates_sourced || 0) + '</div></div>' +
             '<div class="card card-tight"><div class="label-caps">Outreach</div><div class="stat-value">' + (job.metrics?.candidates_in_outreach || 0) + '</div></div>' +

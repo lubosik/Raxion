@@ -6,6 +6,7 @@ import { logActivity } from './activityLogger.js';
 import { processEnrichmentQueue } from './enrichmentService.js';
 import { sourceCandidatesForJob } from './candidateSourcing.js';
 import { getRuntimeState } from './runtimeState.js';
+import { isWithinSendingWindow } from './scheduleService.js';
 
 function todayIsoDate() {
   return new Date().toISOString().slice(0, 10);
@@ -159,6 +160,18 @@ async function checkStuckStages(job) {
 }
 
 export async function processJob(job, runtimeState) {
+  const withinSendingWindow = isWithinSendingWindow(job);
+  if (!withinSendingWindow) {
+    await logActivity(job.id, null, 'OUTSIDE_SENDING_WINDOW', `Outside sending window for ${job.job_title}; sourcing only`, {
+      send_from: job.send_from || '08:00',
+      send_until: job.send_until || '18:00',
+      timezone: job.timezone || 'Europe/London',
+      active_days: job.active_days || 'Mon,Tue,Wed,Thu,Fri',
+    });
+    await checkStuckStages(job);
+    return;
+  }
+
   if (runtimeState.linkedinEnabled && runtimeState.outreachEnabled) {
     await sendPendingConnectionRequests(job);
     await sendPendingDMs(job);
@@ -195,7 +208,7 @@ export async function runOrchestratorCycle() {
         await supabase.from('jobs').update({ last_research_at: new Date().toISOString() }).eq('id', job.id);
       }
 
-      if (runtimeState.enrichmentEnabled) {
+      if (runtimeState.enrichmentEnabled && isWithinSendingWindow(job)) {
         // eslint-disable-next-line no-await-in-loop
         await processEnrichmentQueue(job.id);
       }

@@ -1,6 +1,6 @@
 import supabase from '../db/supabase.js';
 import { callClaude, extractDocumentData } from '../integrations/claude.js';
-import { downloadAttachment } from '../integrations/unipile.js';
+import { downloadAttachment, getChatMessages } from '../integrations/unipile.js';
 import { sendTelegramMessage, getRecruiterChatId } from '../integrations/telegram.js';
 import { syncCandidateToATS } from '../integrations/zohoRecruit.js';
 import { queueApproval } from './approvalService.js';
@@ -37,6 +37,17 @@ async function getConversationHistory(candidateId) {
   return data || [];
 }
 
+async function getRemoteConversationHistory(chatId) {
+  if (!chatId) return [];
+  const messages = await getChatMessages(chatId);
+  return (messages || []).map((message) => ({
+    direction: message.is_sender ? 'outbound' : 'inbound',
+    channel: 'linkedin_dm',
+    message_text: message.text || message.original || '',
+    sent_at: message.timestamp || null,
+  }));
+}
+
 export async function processIncomingMessage(webhookPayload) {
   const chatId = webhookPayload.chat_id || webhookPayload.data?.chat_id || null;
   const senderProviderId = webhookPayload.sender?.attendee_provider_id || webhookPayload.sender?.provider_id || webhookPayload.attendee_provider_id || null;
@@ -68,7 +79,11 @@ export async function processIncomingMessage(webhookPayload) {
   }
 
   const { data: job } = await supabase.from('jobs').select('*').eq('id', candidate.job_id).single();
-  const conversationHistory = await getConversationHistory(candidate.id);
+  const [conversationHistory, remoteConversationHistory] = await Promise.all([
+    getConversationHistory(candidate.id),
+    getRemoteConversationHistory(chatId || candidate.unipile_chat_id),
+  ]);
+  const fullConversationHistory = remoteConversationHistory.length ? remoteConversationHistory : conversationHistory;
 
   await supabase.from('conversations').insert({
     candidate_id: candidate.id,
@@ -117,7 +132,7 @@ export async function processIncomingMessage(webhookPayload) {
     await sendTelegramMessage(getRecruiterChatId(), `📎 ${candidate.name} sent their CV - extracted and synced to ATS`).catch(() => null);
   }
 
-  const classification = await classifyReply(candidate, job, conversationHistory, messageText);
+  const classification = await classifyReply(candidate, job, fullConversationHistory, messageText);
 
   if (classification.qualified) {
     await supabase.from('candidates').update({
@@ -155,6 +170,7 @@ export async function processIncomingMessage(webhookPayload) {
   await logActivity(candidate.job_id, candidate.id, 'REPLY_RECEIVED', `${candidate.name} replied on LinkedIn`, {
     classification,
     message_text: messageText,
+    conversation_messages: fullConversationHistory.length,
   });
 
   await sendTelegramMessage(getRecruiterChatId(), `💬 ${candidate.name} replied to your ${channel} - staging for qualification`).catch(() => null);
