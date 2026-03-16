@@ -11,6 +11,7 @@ import { sendTelegramMessage, getRecruiterChatId } from './src/integrations/tele
 import { logError } from './src/lib_errors.js';
 import { setupWebhooks } from './src/integrations/unipile.js';
 import { ensureSchemaReady } from './src/services/schemaService.js';
+import { hydrateRuntimeConfig } from './src/services/configService.js';
 
 const port = Number(process.env.PORT || 3001);
 const app = express();
@@ -61,6 +62,7 @@ async function bootstrap() {
   try {
     await testSupabase();
     await ensureSchemaReady();
+    await hydrateRuntimeConfig();
     await setupWebhooks();
     startTelegramBot();
     startInboxMonitor();

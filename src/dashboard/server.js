@@ -10,6 +10,8 @@ import { deleteCandidateData } from '../services/gdprService.js';
 import { syncCandidateToATS } from '../integrations/zohoRecruit.js';
 import { generateInterviewBrief } from '../services/qualificationEngine.js';
 import { getRuntimeState, toggleRuntimeStateValue } from '../services/runtimeState.js';
+import { listRuntimeConfig, setRuntimeConfigValue, deleteRuntimeConfigValue } from '../services/configService.js';
+import { getIntegrationHealth } from '../services/healthService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -115,10 +117,11 @@ export function createDashboardServer() {
   });
 
   app.get('/api/health', async (req, res) => {
-    const [{ count: webhookCount }, { count: queueCount }, state] = await Promise.all([
+    const [{ count: webhookCount }, { count: queueCount }, state, integrationHealth] = await Promise.all([
       supabase.from('webhook_logs').select('*', { count: 'exact', head: true }),
       supabase.from('approval_queue').select('*', { count: 'exact', head: true }).in('status', ['pending', 'edited']),
       getRuntimeState(),
+      getIntegrationHealth(req.query.refresh === 'true'),
     ]);
 
     res.json({
@@ -127,7 +130,30 @@ export function createDashboardServer() {
       pending_approvals: queueCount || 0,
       webhook_events_logged: webhookCount || 0,
       server_time: new Date().toISOString(),
+      integration_health: integrationHealth,
     });
+  });
+
+  app.get('/api/config', async (req, res) => {
+    res.json(await listRuntimeConfig());
+  });
+
+  app.post('/api/config', async (req, res) => {
+    try {
+      const updated = await setRuntimeConfigValue(req.body.key, req.body.value || '');
+      res.json(updated);
+    } catch (error) {
+      res.status(400).json({ error: error.message });
+    }
+  });
+
+  app.delete('/api/config/:key', async (req, res) => {
+    try {
+      const updated = await deleteRuntimeConfigValue(req.params.key);
+      res.json(updated);
+    } catch (error) {
+      res.status(400).json({ error: error.message });
+    }
   });
 
   app.post('/api/jobs/create', async (req, res) => {

@@ -9,6 +9,7 @@
     approvals: [],
     runtime: null,
     health: null,
+    config: [],
     selectedJobId: null,
     selectedJobDetail: null,
     selectedJobCandidates: [],
@@ -307,7 +308,7 @@
       render();
     }
 
-    const [stats, jobs, inbox, activity, approvals, runtime, health] = await Promise.all([
+    const [stats, jobs, inbox, activity, approvals, runtime, health, runtimeConfig] = await Promise.all([
       request('/api/stats'),
       request('/api/jobs'),
       request('/api/inbox'),
@@ -315,6 +316,7 @@
       request('/api/approval-queue'),
       request('/api/state'),
       request('/api/health'),
+      request('/api/config'),
     ]);
 
     state.stats = stats;
@@ -324,6 +326,7 @@
     state.approvals = approvals;
     state.runtime = runtime;
     state.health = health;
+    state.config = runtimeConfig;
     const activeJobs = jobs.filter((job) => job.status === 'ACTIVE' && !job.paused);
     state.selectedJobId = state.selectedJobId || activeJobs[0]?.id || jobs[0]?.id || null;
     state.loading = false;
@@ -762,6 +765,7 @@
   function renderControls() {
     const runtime = state.runtime || {};
     const health = state.health || {};
+    const integrationHealth = health.integration_health || { statuses: [], checked_at: null };
     const modules = [
       ['outreachEnabled', 'Outreach'],
       ['followupEnabled', 'Follow-ups'],
@@ -780,6 +784,25 @@
       '</div>'
     )).join('');
 
+    const healthCards = (integrationHealth.statuses || []).map((item) => (
+      '<div class="card health-card">' +
+        '<div class="health-head"><span class="health-dot ' + esc(item.status) + '"></span><strong>' + esc(item.name) + '</strong></div>' +
+        '<div class="cell-sub push-top-sm">' + esc(item.detail || 'No detail') + '</div>' +
+      '</div>'
+    )).join('');
+
+    const configRows = (state.config || []).map((field) => (
+      '<form class="card config-card" data-config-form="true">' +
+        '<input type="hidden" name="key" value="' + esc(field.key) + '" />' +
+        '<div class="config-head">' +
+          '<div><div class="label-caps">' + esc(field.category) + '</div><h3 class="config-title">' + esc(field.label) + '</h3><div class="cell-sub">' + esc(field.key) + (field.restartRequired ? ' · restart required' : ' · live update') + '</div></div>' +
+          '<div class="button-row">' + (field.overridden ? '<button class="btn btn-secondary btn-xs" data-action="delete-config" data-id="' + esc(field.key) + '">Delete</button>' : '') + '</div>' +
+        '</div>' +
+        '<label class="form-span-2"><span>Value</span><textarea class="input textarea config-textarea" name="value" spellcheck="false" placeholder="Paste value here">' + esc(field.value || '') + '</textarea></label>' +
+        '<div class="button-row"><button class="btn btn-primary" type="submit">Save</button></div>' +
+      '</form>'
+    )).join('');
+
     return (
       '<section class="view-section">' +
         '<div class="metric-grid">' +
@@ -789,6 +812,16 @@
           '<div class="metric-card"><div class="metric-label">Last Updated</div><div class="metric-value metric-value-small">' + shortTime(runtime.lastUpdated || health.server_time) + '</div></div>' +
         '</div>' +
         '<div class="grid grid-3">' + modules + '</div>' +
+        '<div class="card">' +
+          '<div class="panel-head"><div><div class="label-caps">API Health</div><h2 class="section-title">Integration Status</h2></div><div class="button-row"><button class="btn btn-secondary" data-action="refresh-health">Refresh</button></div></div>' +
+          '<div class="cell-sub push-top">Last checked: ' + shortTime(integrationHealth.checked_at) + '</div>' +
+          '<div class="grid grid-3 push-top">' + healthCards + '</div>' +
+        '</div>' +
+        '<div class="card">' +
+          '<div class="label-caps">Environment</div><h2 class="section-title">Runtime Config</h2>' +
+          '<div class="cell-sub push-top">Edits here persist in Supabase-backed settings. Fields marked restart required do not fully apply until the process restarts.</div>' +
+          '<div class="config-grid push-top">' + configRows + '</div>' +
+        '</div>' +
       '</section>'
     );
   }
@@ -922,6 +955,21 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ key: extra }),
       });
+      await loadCoreData({ preserveDrafts: true });
+      state.view = 'controls';
+      render();
+      return;
+    }
+
+    if (action === 'refresh-health') {
+      state.health = await request('/api/health?refresh=true');
+      render();
+      return;
+    }
+
+    if (action === 'delete-config') {
+      await request('/api/config/' + encodeURIComponent(id), { method: 'DELETE' });
+      showToast('Config value deleted.');
       await loadCoreData({ preserveDrafts: true });
       state.view = 'controls';
       render();
@@ -1127,6 +1175,20 @@
       showToast('Templates saved.');
       await loadCoreData({ preserveDrafts: true });
       await loadSelectedJob(jobId, { preserveDrafts: true });
+      return;
+    }
+
+    if (event.target.dataset.configForm === 'true') {
+      event.preventDefault();
+      const payload = Object.fromEntries(new FormData(event.target).entries());
+      await request('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      showToast('Config value saved.');
+      await loadCoreData({ preserveDrafts: true });
+      state.view = 'controls';
     }
   });
 

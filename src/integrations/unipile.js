@@ -1,11 +1,25 @@
 import { sleep } from '../lib_utils.js';
+import { getRuntimeConfigValue } from '../services/configService.js';
 
-const baseUrl = process.env.UNIPILE_DSN ? `https://${process.env.UNIPILE_DSN}/api/v1` : null;
-const apiKey = process.env.UNIPILE_API_KEY;
-const linkedinAccountId = process.env.UNIPILE_LINKEDIN_ACCOUNT_ID;
-const emailAccountId = process.env.UNIPILE_EMAIL_ACCOUNT_ID;
+function getBaseUrl() {
+  const dsn = getRuntimeConfigValue('UNIPILE_DSN');
+  return dsn ? `https://${dsn}/api/v1` : null;
+}
+
+function getApiKey() {
+  return getRuntimeConfigValue('UNIPILE_API_KEY');
+}
+
+function getLinkedinAccountId() {
+  return getRuntimeConfigValue('UNIPILE_LINKEDIN_ACCOUNT_ID');
+}
+
+function getEmailAccountId() {
+  return getRuntimeConfigValue('UNIPILE_EMAIL_ACCOUNT_ID');
+}
 
 function withQuery(path, params = {}) {
+  const baseUrl = getBaseUrl();
   const url = new URL(`${baseUrl}${path}`);
   Object.entries(params).forEach(([key, value]) => {
     if (value != null && value !== '') url.searchParams.set(key, String(value));
@@ -14,6 +28,8 @@ function withQuery(path, params = {}) {
 }
 
 async function request(path, { method = 'GET', body, headers = {}, isMultipart = false, returnBuffer = false, query } = {}) {
+  const baseUrl = getBaseUrl();
+  const apiKey = getApiKey();
   if (!baseUrl || !apiKey) {
     console.error('[unipile] missing UNIPILE_DSN or UNIPILE_API_KEY');
     return null;
@@ -125,6 +141,7 @@ async function resolveSearchParams(params = {}) {
 }
 
 export async function searchLinkedInPeople(params = {}) {
+  const linkedinAccountId = getLinkedinAccountId();
   const resolvedParams = await resolveSearchParams(params);
   const result = await request('/linkedin/search', {
     method: 'POST',
@@ -139,6 +156,7 @@ export async function searchLinkedInPeople(params = {}) {
 }
 
 export async function getLinkedInProfile(providerId) {
+  const linkedinAccountId = getLinkedinAccountId();
   return request(`/users/${encodeURIComponent(providerId)}`, {
     query: {
       account_id: linkedinAccountId,
@@ -149,6 +167,7 @@ export async function getLinkedInProfile(providerId) {
 }
 
 export async function sendConnectionRequest(providerId, message) {
+  const linkedinAccountId = getLinkedinAccountId();
   return request('/users/invite', {
     method: 'POST',
     body: {
@@ -160,6 +179,7 @@ export async function sendConnectionRequest(providerId, message) {
 }
 
 export async function startLinkedInDM(providerId, message) {
+  const linkedinAccountId = getLinkedinAccountId();
   return request('/chats', {
     method: 'POST',
     body: {
@@ -171,12 +191,14 @@ export async function startLinkedInDM(providerId, message) {
 }
 
 export async function getChat(chatId) {
+  const linkedinAccountId = getLinkedinAccountId();
   return request(`/chats/${encodeURIComponent(chatId)}`, {
     query: { account_id: linkedinAccountId },
   });
 }
 
 export async function sendLinkedInDM(chatId, message) {
+  const linkedinAccountId = getLinkedinAccountId();
   return request(`/chats/${encodeURIComponent(chatId)}/messages`, {
     method: 'POST',
     body: {
@@ -200,6 +222,7 @@ export async function downloadAttachment(messageId, attachmentId) {
 }
 
 export async function sendEmail(toEmail, toName, subject, body, replyToMessageId = null) {
+  const emailAccountId = getEmailAccountId();
   const form = new FormData();
   form.set('account_id', emailAccountId || '');
   form.set('subject', subject || '');
@@ -215,12 +238,14 @@ export async function sendEmail(toEmail, toName, subject, body, replyToMessageId
 }
 
 export async function getEmail(emailId) {
+  const emailAccountId = getEmailAccountId();
   return request(`/emails/${encodeURIComponent(emailId)}`, {
     query: emailAccountId ? { account_id: emailAccountId } : undefined,
   });
 }
 
 export async function downloadEmailAttachment(emailId, attachmentId) {
+  const emailAccountId = getEmailAccountId();
   return request(`/emails/${encodeURIComponent(emailId)}/attachments/${encodeURIComponent(attachmentId)}`, {
     query: emailAccountId ? { account_id: emailAccountId } : undefined,
     returnBuffer: true,
@@ -228,6 +253,7 @@ export async function downloadEmailAttachment(emailId, attachmentId) {
 }
 
 export async function createPost({ text, includeJobPosting, externalLink, asOrganization } = {}) {
+  const linkedinAccountId = getLinkedinAccountId();
   return request('/posts', {
     method: 'POST',
     body: {
@@ -241,6 +267,7 @@ export async function createPost({ text, includeJobPosting, externalLink, asOrga
 }
 
 export async function listLinkedInJobPostings() {
+  const linkedinAccountId = getLinkedinAccountId();
   const result = await request('/linkedin/jobs', {
     query: { account_id: linkedinAccountId, category: 'active' },
   });
@@ -248,6 +275,7 @@ export async function listLinkedInJobPostings() {
 }
 
 export async function createLinkedInJobPosting(jobData) {
+  const linkedinAccountId = getLinkedinAccountId();
   return request('/linkedin/jobs', {
     method: 'POST',
     body: {
@@ -258,6 +286,7 @@ export async function createLinkedInJobPosting(jobData) {
 }
 
 export async function publishLinkedInJobPosting(draftId) {
+  const linkedinAccountId = getLinkedinAccountId();
   return request(`/linkedin/jobs/${encodeURIComponent(draftId)}/publish`, {
     method: 'POST',
     body: {
@@ -269,6 +298,7 @@ export async function publishLinkedInJobPosting(draftId) {
 }
 
 export async function closeLinkedInJobPosting(jobId) {
+  const linkedinAccountId = getLinkedinAccountId();
   return request(`/linkedin/jobs/${encodeURIComponent(jobId)}/close`, {
     method: 'POST',
     query: { account_id: linkedinAccountId },
@@ -276,6 +306,7 @@ export async function closeLinkedInJobPosting(jobId) {
 }
 
 export async function getJobApplicants(linkedinJobId, filters = {}) {
+  const linkedinAccountId = getLinkedinAccountId();
   const result = await request(`/linkedin/jobs/${encodeURIComponent(linkedinJobId)}/applicants`, {
     query: { account_id: linkedinAccountId, ...filters },
   });
@@ -283,6 +314,7 @@ export async function getJobApplicants(linkedinJobId, filters = {}) {
 }
 
 export async function downloadApplicantResume(applicantId) {
+  const linkedinAccountId = getLinkedinAccountId();
   return request(`/linkedin/jobs/applicants/${encodeURIComponent(applicantId)}/resume`, {
     query: { account_id: linkedinAccountId },
     returnBuffer: true,
@@ -290,6 +322,7 @@ export async function downloadApplicantResume(applicantId) {
 }
 
 export async function getSearchParameters(type, keywords) {
+  const linkedinAccountId = getLinkedinAccountId();
   const result = await request('/linkedin/search/parameters', {
     query: { type, keywords, account_id: linkedinAccountId },
   });
@@ -297,7 +330,9 @@ export async function getSearchParameters(type, keywords) {
 }
 
 export async function setupWebhooks() {
-  if (!process.env.SERVER_BASE_URL) {
+  const serverBaseUrl = getRuntimeConfigValue('SERVER_BASE_URL');
+  const linkedinAccountId = getLinkedinAccountId();
+  if (!serverBaseUrl) {
     console.warn('[unipile] skipping webhook setup: SERVER_BASE_URL is not configured');
     return false;
   }
@@ -307,7 +342,7 @@ export async function setupWebhooks() {
     {
       name: 'Raxion Messaging',
       source: 'messaging',
-      request_url: `${process.env.SERVER_BASE_URL}/webhooks/unipile/messages`,
+      request_url: `${serverBaseUrl}/webhooks/unipile/messages`,
       format: 'json',
       enabled: true,
       account_ids: linkedinAccountId ? [linkedinAccountId] : undefined,
@@ -317,7 +352,7 @@ export async function setupWebhooks() {
     {
       name: 'Raxion Relations',
       source: 'users',
-      request_url: `${process.env.SERVER_BASE_URL}/webhooks/unipile/relations`,
+      request_url: `${serverBaseUrl}/webhooks/unipile/relations`,
       format: 'json',
       enabled: true,
       account_ids: linkedinAccountId ? [linkedinAccountId] : undefined,

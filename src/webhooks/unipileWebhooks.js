@@ -3,6 +3,7 @@ import supabase from '../db/supabase.js';
 import { processIncomingMessage } from '../services/replyHandler.js';
 import { logActivity } from '../services/activityLogger.js';
 import { sendTelegramMessage, getRecruiterChatId } from '../integrations/telegram.js';
+import { getRuntimeConfigValue } from '../services/configService.js';
 
 export function createUnipileWebhookRouter() {
   const router = express.Router();
@@ -46,7 +47,8 @@ export function createUnipileWebhookRouter() {
     }
 
     if (payload.event === 'message_received') {
-      if (payload.account_id && payload.account_id !== process.env.UNIPILE_LINKEDIN_ACCOUNT_ID) return;
+      const linkedinAccountId = getRuntimeConfigValue('UNIPILE_LINKEDIN_ACCOUNT_ID');
+      if (payload.account_id && payload.account_id !== linkedinAccountId) return;
       const senderId = payload.sender?.attendee_provider_id || payload.sender?.provider_id || null;
       const ownUserId = payload.account_info?.user_id || null;
       if (senderId && ownUserId && senderId === ownUserId) return;
@@ -57,9 +59,10 @@ export function createUnipileWebhookRouter() {
     }
 
     if (payload.event === 'mail_received') {
-      if (payload.account_id && process.env.UNIPILE_EMAIL_ACCOUNT_ID && payload.account_id !== process.env.UNIPILE_EMAIL_ACCOUNT_ID) return;
+      const emailAccountId = getRuntimeConfigValue('UNIPILE_EMAIL_ACCOUNT_ID');
+      if (payload.account_id && emailAccountId && payload.account_id !== emailAccountId) return;
       const fromEmail = payload.from_attendee?.identifier || null;
-      const ownReplyEmail = process.env.REPLY_TO_EMAIL || null;
+      const ownReplyEmail = getRuntimeConfigValue('REPLY_TO_EMAIL') || null;
       if (ownReplyEmail && fromEmail && fromEmail.toLowerCase() === ownReplyEmail.toLowerCase()) return;
       await processIncomingMessage(normaliseEmailPayload(payload)).catch((error) => {
         console.error('[webhooks.email] processing failed', error);

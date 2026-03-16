@@ -1,15 +1,17 @@
 import supabase from '../db/supabase.js';
 import { logActivity } from '../services/activityLogger.js';
+import { getRuntimeConfigValue } from '../services/configService.js';
 
 let cachedToken = null;
 let cachedUntil = 0;
 
 async function requestZoho(path, options = {}) {
+  const apiBase = getRuntimeConfigValue('ZOHO_API_BASE');
   const token = await getAccessToken();
-  if (!token) return null;
+  if (!token || !apiBase) return null;
 
   try {
-    const response = await fetch(`${process.env.ZOHO_API_BASE}${path}`, {
+    const response = await fetch(`${apiBase}${path}`, {
       ...options,
       headers: {
         Authorization: `Zoho-oauthtoken ${token}`,
@@ -32,16 +34,20 @@ async function requestZoho(path, options = {}) {
 
 export async function getAccessToken() {
   if (cachedToken && Date.now() < cachedUntil) return cachedToken;
-  if (!process.env.ZOHO_CLIENT_ID || !process.env.ZOHO_CLIENT_SECRET || !process.env.ZOHO_REFRESH_TOKEN) return null;
+  const clientId = getRuntimeConfigValue('ZOHO_CLIENT_ID');
+  const clientSecret = getRuntimeConfigValue('ZOHO_CLIENT_SECRET');
+  const refreshToken = getRuntimeConfigValue('ZOHO_REFRESH_TOKEN');
+  const accountsUrl = getRuntimeConfigValue('ZOHO_ACCOUNTS_URL', 'https://accounts.zoho.eu');
+  if (!clientId || !clientSecret || !refreshToken) return null;
 
   try {
     const params = new URLSearchParams({
-      refresh_token: process.env.ZOHO_REFRESH_TOKEN,
-      client_id: process.env.ZOHO_CLIENT_ID,
-      client_secret: process.env.ZOHO_CLIENT_SECRET,
+      refresh_token: refreshToken,
+      client_id: clientId,
+      client_secret: clientSecret,
       grant_type: 'refresh_token',
     });
-    const response = await fetch(`${process.env.ZOHO_ACCOUNTS_URL || 'https://accounts.zoho.eu'}/oauth/v2/token`, {
+    const response = await fetch(`${accountsUrl}/oauth/v2/token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: params,

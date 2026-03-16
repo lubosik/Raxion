@@ -1,7 +1,15 @@
-const botToken = process.env.TELEGRAM_BOT_TOKEN;
-const recruiterChatId = process.env.TELEGRAM_CHAT_ID;
+import { getRuntimeConfigValue } from '../services/configService.js';
+
+function getBotToken() {
+  return getRuntimeConfigValue('TELEGRAM_BOT_TOKEN');
+}
+
+function getRecruiterChatIdValue() {
+  return getRuntimeConfigValue('TELEGRAM_CHAT_ID');
+}
 
 async function sendTelegramRequest(method, payload) {
+  const botToken = getBotToken();
   if (!botToken) {
     throw new Error('Missing TELEGRAM_BOT_TOKEN.');
   }
@@ -44,10 +52,12 @@ export async function editTelegramMessage(chatId, messageId, message) {
 }
 
 export async function sendCriticalAlert(message) {
+  const recruiterChatId = getRecruiterChatIdValue();
+  const botToken = getBotToken();
   if (!recruiterChatId || !botToken) return null;
   return sendTelegramMessage(recruiterChatId, `🚨 RAXION ALERT\n\n${message}`);
 }
 
 export function getRecruiterChatId() {
-  return recruiterChatId;
+  return getRecruiterChatIdValue();
 }

@@ -162,6 +162,17 @@ tbody tr:last-child td { border-bottom: 0; }
 .toggle-switch span { position: absolute; top: 3px; left: 3px; width: 26px; height: 26px; border-radius: 999px; background: #fff; transition: 0.18s ease; box-shadow: 0 4px 10px rgba(0,0,0,0.12); }
 .toggle-switch.is-on { background: var(--forest); }
 .toggle-switch.is-on span { left: 28px; }
+.health-card { min-height: 132px; }
+.health-head, .config-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
+.health-dot { width: 10px; height: 10px; border-radius: 999px; display: inline-block; margin-right: 8px; }
+.health-dot.ok { background: var(--emerald); }
+.health-dot.warn { background: var(--amber); }
+.health-dot.error { background: var(--red); }
+.config-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+.config-card { display: flex; flex-direction: column; gap: 16px; }
+.config-title { font-size: 1rem; line-height: 1.2; margin-top: 4px; }
+.config-textarea { min-height: 120px; font-family: 'IBM Plex Mono', monospace; font-size: 0.82rem; }
+.push-top-sm { margin-top: 10px; }
 
 .notice { padding: 18px 20px; border-radius: 8px; background: rgba(255,255,255,0.7); border: 1px solid rgba(35, 67, 52, 0.12); color: var(--muted); }
 .toast-wrap { position: fixed; right: 24px; bottom: 24px; display: flex; flex-direction: column; gap: 10px; z-index: 60; }
@@ -192,7 +203,7 @@ tbody tr:last-child td { border-bottom: 0; }
   .container { padding: 28px 20px; }
   .page-header { flex-direction: column; align-items: flex-start; }
   .page-title { font-size: 2.5rem; }
-  .metric-grid, .form-grid, .detail-grid, .pipeline-legend { grid-template-columns: 1fr; }
+  .metric-grid, .form-grid, .detail-grid, .pipeline-legend, .config-grid { grid-template-columns: 1fr; }
   .hero-head, .toggle-card, .thread-row, .event-row, .activity-entry { grid-template-columns: 1fr; display: flex; flex-direction: column; align-items: flex-start; }
   .thread-meta { text-align: left; }
 }

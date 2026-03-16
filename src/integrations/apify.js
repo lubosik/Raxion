@@ -1,18 +1,21 @@
 import { sleep } from '../lib_utils.js';
+import { getRuntimeConfigValue } from '../services/configService.js';
 
 const baseUrl = 'https://api.apify.com/v2';
 
 export async function enrichCandidateContact(linkedinUrl) {
-  if (!linkedinUrl || !process.env.APIFY_API_KEY || !process.env.APIFY_ACTOR_ID) {
+  const apiKey = getRuntimeConfigValue('APIFY_API_KEY');
+  const actorConfig = getRuntimeConfigValue('APIFY_ACTOR_ID');
+  if (!linkedinUrl || !apiKey || !actorConfig) {
     return { email: null, phone: null };
   }
 
   try {
-    const actorId = encodeURIComponent(process.env.APIFY_ACTOR_ID);
+    const actorId = encodeURIComponent(actorConfig);
     const response = await fetch(`${baseUrl}/acts/${actorId}/run-sync-get-dataset-items`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${process.env.APIFY_API_KEY}`,
+        Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ profileUrls: [linkedinUrl] }),

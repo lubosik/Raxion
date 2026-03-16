@@ -1,7 +1,14 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { logError, normalizeError } from '../lib_errors.js';
+import { getRuntimeConfigValue } from '../services/configService.js';
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+function getAnthropicClient() {
+  const apiKey = getRuntimeConfigValue('ANTHROPIC_API_KEY');
+  if (!apiKey) {
+    throw new Error('Missing ANTHROPIC_API_KEY.');
+  }
+  return new Anthropic({ apiKey });
+}
 
 function extractText(response) {
   return (response.content || [])
@@ -20,7 +27,7 @@ export async function callClaude(prompt, systemPrompt, options = {}) {
   const { expectJson = false, maxTokens = 1000, messages, temperature = 0 } = options;
 
   try {
-    const response = await anthropic.messages.create({
+    const response = await getAnthropicClient().messages.create({
       model: 'claude-sonnet-4-20250514',
       max_tokens: maxTokens,
       temperature,
@@ -58,5 +65,3 @@ export async function extractDocumentData(base64Data, mediaType, prompt, systemP
     }],
   });
 }
-
-export default anthropic;
