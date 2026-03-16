@@ -48,6 +48,46 @@ function normaliseCandidate(profile, job, scoring, source = 'LinkedIn Search') {
   };
 }
 
+function stageRank(stage) {
+  const ranking = {
+    Archived: 0,
+    Sourced: 1,
+    Shortlisted: 2,
+    Enriched: 3,
+    invite_sent: 4,
+    invite_accepted: 5,
+    dm_sent: 6,
+    email_sent: 6,
+    Replied: 7,
+    Qualified: 8,
+    Placed: 9,
+  };
+  return ranking[stage] ?? 0;
+}
+
+function mergeCandidateWithExisting(existing, incoming) {
+  if (!existing) return incoming;
+
+  const existingScore = Number(existing.fit_score || 0);
+  const incomingScore = Number(incoming.fit_score || 0);
+  const preserveExistingScore = existingScore > incomingScore;
+  const preserveExistingStage = stageRank(existing.pipeline_stage) > stageRank(incoming.pipeline_stage);
+
+  return {
+    ...incoming,
+    fit_score: preserveExistingScore ? existing.fit_score : incoming.fit_score,
+    fit_grade: preserveExistingScore ? existing.fit_grade : incoming.fit_grade,
+    fit_rationale: preserveExistingScore ? existing.fit_rationale : incoming.fit_rationale,
+    pipeline_stage: preserveExistingStage || preserveExistingScore ? existing.pipeline_stage : incoming.pipeline_stage,
+    enrichment_status: existing.enrichment_status || incoming.enrichment_status,
+    invite_sent_at: existing.invite_sent_at || incoming.invite_sent_at || null,
+    invite_accepted_at: existing.invite_accepted_at || incoming.invite_accepted_at || null,
+    dm_sent_at: existing.dm_sent_at || incoming.dm_sent_at || null,
+    last_reply_at: existing.last_reply_at || incoming.last_reply_at || null,
+    unipile_chat_id: existing.unipile_chat_id || incoming.unipile_chat_id || null,
+  };
+}
+
 async function generateSearchQueries(job) {
   const generated = await callClaude(
     `Generate 3 LinkedIn people search query variations as JSON for this role.\nJob title: ${job.job_title}\nMust-have skills: ${job.tech_stack_must}\nLocation: ${job.location}\nSeniority: ${job.seniority_level}\nSector: ${job.sector}\nRemote policy: ${job.remote_policy}\nReturn {"queries":[{"keywords":"","location":"","network_distance":[1,2]}]}.`,
@@ -202,7 +242,15 @@ export async function sourceCandidatesForJob(jobOrId) {
 
     const candidate = normaliseCandidate(mergedProfile, job, scoring);
     // eslint-disable-next-line no-await-in-loop
-    const { data } = await supabase.from('candidates').upsert(candidate, {
+    const { data: existing } = await supabase
+      .from('candidates')
+      .select('*')
+      .eq('job_id', job.id)
+      .eq('linkedin_provider_id', candidate.linkedin_provider_id)
+      .maybeSingle();
+    const candidatePayload = mergeCandidateWithExisting(existing, candidate);
+    // eslint-disable-next-line no-await-in-loop
+    const { data } = await supabase.from('candidates').upsert(candidatePayload, {
       onConflict: 'job_id,linkedin_provider_id',
     }).select('*').single();
     if (data) {
@@ -370,9 +418,17 @@ export async function sourceFromLinkedInJobPosting(jobOrId) {
     const candidate = normaliseCandidate(applicant, job, scoring, 'Job Posting Applicant');
     candidate.cv_text = cvText;
     candidate.pipeline_stage = scoring.fit_score >= 60 ? 'Shortlisted' : 'Sourced';
+    // eslint-disable-next-line no-await-in-loop
+    const { data: existing } = await supabase
+      .from('candidates')
+      .select('*')
+      .eq('job_id', job.id)
+      .eq('linkedin_provider_id', candidate.linkedin_provider_id)
+      .maybeSingle();
+    const candidatePayload = mergeCandidateWithExisting(existing, candidate);
 
     // eslint-disable-next-line no-await-in-loop
-    const { data } = await supabase.from('candidates').upsert(candidate, {
+    const { data } = await supabase.from('candidates').upsert(candidatePayload, {
       onConflict: 'job_id,linkedin_provider_id',
     }).select('*').single();
     if (data) saved.push(data);
