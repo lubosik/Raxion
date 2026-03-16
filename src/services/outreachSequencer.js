@@ -1,6 +1,7 @@
 import supabase from '../db/supabase.js';
 import { callClaude } from '../integrations/claude.js';
 import { sendConnectionRequest } from '../integrations/unipile.js';
+import { getRuntimeConfigValue } from './configService.js';
 import { sendTelegramMessage, getRecruiterChatId } from '../integrations/telegram.js';
 import { sleep, todayIsoDate } from '../lib_utils.js';
 import { queueApproval, executeApprovedSends } from './approvalService.js';
@@ -46,6 +47,12 @@ async function getPipelineCandidateCount(jobId, stages) {
     .in('pipeline_stage', stages);
 
   return count || 0;
+}
+
+function getNumericRuntimeValue(key, fallback) {
+  const raw = getRuntimeConfigValue(key, null);
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 async function sendAutonomousConnectionRequests(job) {
@@ -244,15 +251,16 @@ export async function runJobCycle(job, runtimeState) {
   const withinWindow = isWithinSendingWindow(job);
 
   if (runtimeState.researchEnabled) {
-    const pipelineTarget = 25;
-    const shortlistTarget = 5;
+    const pipelineTarget = getNumericRuntimeValue('RAXION_SOURCING_PIPELINE_TARGET', 25);
+    const shortlistTarget = getNumericRuntimeValue('RAXION_SOURCING_SHORTLIST_TARGET', 5);
+    const cooldownHours = getNumericRuntimeValue('RAXION_SOURCING_COOLDOWN_HOURS', 6);
     const pipelineCount = await getPipelineCandidateCount(job.id, ['Sourced', 'Shortlisted', 'Enriched']);
     const shortlistedCount = await getPipelineCandidateCount(job.id, ['Shortlisted']);
-    const cooldownMs = 6 * 60 * 60 * 1000;
+    const cooldownMs = cooldownHours * 60 * 60 * 1000;
     const shouldTopUp = pipelineCount < pipelineTarget || shortlistedCount < shortlistTarget;
 
     if (shouldTopUp && (!job.last_research_at || Date.now() - new Date(job.last_research_at).getTime() > cooldownMs)) {
-      await logActivity(job.id, null, 'AUTO_SOURCING', `Pipeline top-up triggered (pre-outreach: ${pipelineCount}/${pipelineTarget}, shortlisted: ${shortlistedCount}/${shortlistTarget})`, {});
+      await logActivity(job.id, null, 'AUTO_SOURCING', `Pipeline top-up triggered (pre-outreach: ${pipelineCount}/${pipelineTarget}, shortlisted: ${shortlistedCount}/${shortlistTarget}, cooldown: ${cooldownHours}h)`, {});
       await sourceCandidatesForJob(job);
       await supabase.from('jobs').update({ last_research_at: new Date().toISOString() }).eq('id', job.id);
     }

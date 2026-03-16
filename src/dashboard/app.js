@@ -658,6 +658,12 @@
       ['postsEnabled', 'Posts'],
     ];
 
+    const groupedConfig = (state.config || []).reduce((groups, field) => {
+      if (!groups[field.category]) groups[field.category] = [];
+      groups[field.category].push(field);
+      return groups;
+    }, {});
+
     return (
       '<section class="view-section">' +
         '<div class="metric-strip">' +
@@ -668,7 +674,23 @@
         '</div>' +
         '<div class="jobs-grid">' + toggles.map(([key, label]) => `<div class="surface toggle-surface"><div><div class="label-caps">Module</div><h3 class="section-title small">${esc(label)}</h3></div><button class="toggle-switch ${runtime[key] ? 'is-on' : ''}" data-action="toggle-runtime" data-id="${esc(key)}"><span></span></button></div>`).join('') + '</div>' +
         '<div class="surface"><div class="section-head"><div><div class="label-caps">API Health</div><h2 class="section-title">Integration Status</h2></div><button class="btn btn-secondary btn-sm" data-action="refresh-health">Refresh</button></div><div class="health-grid">' + (integrationHealth.statuses || []).map((item) => `<div class="health-card"><div class="health-head"><span class="health-dot ${esc(item.status)}"></span><strong>${esc(item.name)}</strong></div><div class="candidate-sub">${esc(item.detail || '')}</div></div>`).join('') + '</div></div>' +
-        '<div class="surface"><div class="section-head"><div><div class="label-caps">Environment</div><h2 class="section-title">Runtime Config</h2></div></div><div class="config-grid">' + (state.config || []).map((field) => `<form class="config-card" data-config-form="true"><input type="hidden" name="key" value="${esc(field.key)}" /><div class="config-head"><div><div class="label-caps">${esc(field.category)}</div><h3 class="section-title small">${esc(field.label)}</h3><div class="candidate-sub">${esc(field.key)}${field.restartRequired ? ' · restart required' : ' · live update'}</div></div>${field.overridden ? `<button class="btn btn-secondary btn-sm" data-action="delete-config" data-id="${esc(field.key)}">Delete</button>` : ''}</div><textarea class="input textarea mono-text" name="value">${esc(field.value || '')}</textarea><div class="button-row"><button class="btn btn-primary btn-sm" type="submit">Save</button></div></form>`).join('') + '</div></div>' +
+        '<div class="surface"><div class="section-head"><div><div class="label-caps">Environment</div><h2 class="section-title">Runtime Config</h2></div></div><div class="view-section">' + Object.entries(groupedConfig).map(([category, fields]) => (
+          '<section class="config-group">' +
+            `<div><div class="label-caps">${esc(category)}</div><h3 class="section-title small">${esc(category)} Controls</h3></div>` +
+            '<div class="config-grid">' +
+            fields.map((field) => {
+              const inputType = field.inputType || 'text';
+              const inputClass = inputType === 'number' || inputType === 'password' || inputType === 'text'
+                ? `input config-input${field.secret ? ' mono-text' : ''}`
+                : 'input textarea mono-text';
+              const inputMarkup = inputType === 'number' || inputType === 'password' || inputType === 'text'
+                ? `<input class="${inputClass}" type="${esc(inputType)}" name="value" value="${esc(field.value || '')}" />`
+                : `<textarea class="input textarea mono-text" name="value">${esc(field.value || '')}</textarea>`;
+              return `<form class="config-card" data-config-form="true"><input type="hidden" name="key" value="${esc(field.key)}" /><div class="config-head"><div><div class="label-caps">${esc(field.category)}</div><h3 class="section-title small">${esc(field.label)}</h3><div class="candidate-sub">${esc(field.key)}${field.restartRequired ? ' · restart required' : ' · live update'}</div>${field.description ? `<div class="candidate-sub">${esc(field.description)}</div>` : ''}</div>${field.overridden ? `<button class="btn btn-secondary btn-sm" data-action="delete-config" data-id="${esc(field.key)}">Delete</button>` : ''}</div>${inputMarkup}<div class="button-row"><button class="btn btn-primary btn-sm" type="submit">Save</button></div></form>`;
+            }).join('') +
+            '</div>' +
+          '</section>'
+        )).join('') + '</div></div>' +
       '</section>'
     );
   }

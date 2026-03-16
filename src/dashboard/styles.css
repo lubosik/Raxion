@@ -446,6 +446,12 @@ tbody tr:last-child td {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.config-group {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
 .job-card {
   padding: 24px;
   border-left: 4px solid var(--line);
@@ -927,6 +933,10 @@ tbody tr:last-child td {
   border: 1px solid rgba(24, 32, 27, 0.14);
   background: #ffffff;
   color: var(--text);
+}
+
+.config-input {
+  min-height: 44px;
 }
 
 .textarea {

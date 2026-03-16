@@ -42,11 +42,15 @@ Raxion is a standalone autonomous recruiting operations system for recruitment a
 - `SERVER_BASE_URL`
 - `SENDER_NAME`
 - `REPLY_TO_EMAIL`
+- `RAXION_SOURCING_PIPELINE_TARGET`
+- `RAXION_SOURCING_SHORTLIST_TARGET`
+- `RAXION_SOURCING_COOLDOWN_HOURS`
 
 ## Runtime Overview
 
 - `index.js` boots Express, the dashboard server, the live Unipile webhook router, the Telegram bot, the inbox monitor, schema checks, and the orchestrator cron.
 - `src/services/outreachSequencer.js` runs jobs sequentially and only gates the actual send phase on the job sending window.
+- Mission Control runtime config can override env-backed integration settings and sourcing controls live via the Controls tab.
 - `src/services/candidateSourcing.js` handles sourcing and scoring.
 - `src/services/enrichmentService.js` enriches shortlisted candidates.
 - `src/services/approvalService.js` validates drafts, queues approvals, and executes approved sends.
