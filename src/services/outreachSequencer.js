@@ -244,10 +244,15 @@ export async function runJobCycle(job, runtimeState) {
   const withinWindow = isWithinSendingWindow(job);
 
   if (runtimeState.researchEnabled) {
-    const candidateCount = await getPipelineCandidateCount(job.id, ['Sourced', 'Shortlisted', 'Enriched']);
-    const cooldownMs = 24 * 60 * 60 * 1000;
-    if (candidateCount < 10 && (!job.last_research_at || Date.now() - new Date(job.last_research_at).getTime() > cooldownMs)) {
-      await logActivity(job.id, null, 'AUTO_SOURCING', `Pipeline light (${candidateCount}), triggering sourcing`, {});
+    const pipelineTarget = 25;
+    const shortlistTarget = 5;
+    const pipelineCount = await getPipelineCandidateCount(job.id, ['Sourced', 'Shortlisted', 'Enriched']);
+    const shortlistedCount = await getPipelineCandidateCount(job.id, ['Shortlisted']);
+    const cooldownMs = 6 * 60 * 60 * 1000;
+    const shouldTopUp = pipelineCount < pipelineTarget || shortlistedCount < shortlistTarget;
+
+    if (shouldTopUp && (!job.last_research_at || Date.now() - new Date(job.last_research_at).getTime() > cooldownMs)) {
+      await logActivity(job.id, null, 'AUTO_SOURCING', `Pipeline top-up triggered (pre-outreach: ${pipelineCount}/${pipelineTarget}, shortlisted: ${shortlistedCount}/${shortlistTarget})`, {});
       await sourceCandidatesForJob(job);
       await supabase.from('jobs').update({ last_research_at: new Date().toISOString() }).eq('id', job.id);
     }
