@@ -8,13 +8,14 @@ export async function enrichCandidateContact(linkedinUrl) {
   }
 
   try {
-    const response = await fetch(`${baseUrl}/acts/${process.env.APIFY_ACTOR_ID}/run-sync-get-dataset-items`, {
+    const actorId = encodeURIComponent(process.env.APIFY_ACTOR_ID);
+    const response = await fetch(`${baseUrl}/acts/${actorId}/run-sync-get-dataset-items`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${process.env.APIFY_API_KEY}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ linkedInUrls: [linkedinUrl] }),
+      body: JSON.stringify({ profileUrls: [linkedinUrl] }),
       signal: AbortSignal.timeout(60000),
     });
 
