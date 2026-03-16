@@ -168,13 +168,16 @@ export async function getLinkedInProfile(providerId) {
 
 export async function sendConnectionRequest(providerId, message) {
   const linkedinAccountId = getLinkedinAccountId();
+  const payload = {
+    provider_id: providerId,
+    account_id: linkedinAccountId,
+  };
+  if (message && String(message).trim()) {
+    payload.message = String(message).slice(0, 300);
+  }
   return request('/users/invite', {
     method: 'POST',
-    body: {
-      provider_id: providerId,
-      account_id: linkedinAccountId,
-      message: (message || '').slice(0, 300),
-    },
+    body: payload,
   });
 }
 

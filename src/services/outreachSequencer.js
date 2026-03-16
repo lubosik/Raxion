@@ -1,5 +1,6 @@
 import supabase from '../db/supabase.js';
 import { callClaude } from '../integrations/claude.js';
+import { sendConnectionRequest } from '../integrations/unipile.js';
 import { sendTelegramMessage, getRecruiterChatId } from '../integrations/telegram.js';
 import { sleep, todayIsoDate } from '../lib_utils.js';
 import { queueApproval, executeApprovedSends } from './approvalService.js';
@@ -23,6 +24,20 @@ async function draftMessage(prompt) {
   return callClaude(prompt, 'You write concise, warm recruiter outreach. Return plain text only.').catch(() => null);
 }
 
+async function incrementDailyLimit(jobId, channel) {
+  const limits = await ensureDailyLimits(jobId);
+  if (!limits) return;
+
+  const updates = {};
+  if (channel === 'connection_request') updates.invites_sent = (limits.invites_sent || 0) + 1;
+  if (channel === 'linkedin_dm') updates.dms_sent = (limits.dms_sent || 0) + 1;
+  if (channel === 'email') updates.emails_sent = (limits.emails_sent || 0) + 1;
+
+  if (Object.keys(updates).length) {
+    await supabase.from('daily_limits').update(updates).eq('job_id', jobId).eq('date', todayIsoDate());
+  }
+}
+
 async function getPipelineCandidateCount(jobId, stages) {
   const { count } = await supabase
     .from('candidates')
@@ -33,16 +48,9 @@ async function getPipelineCandidateCount(jobId, stages) {
   return count || 0;
 }
 
-async function draftConnectionRequests(job) {
+async function sendAutonomousConnectionRequests(job) {
   const limits = await ensureDailyLimits(job.id);
-  const pendingApprovals = await supabase
-    .from('approval_queue')
-    .select('*', { count: 'exact', head: true })
-    .eq('job_id', job.id)
-    .eq('channel', 'connection_request')
-    .in('status', ['pending', 'edited', 'approved']);
-  const queuedCount = pendingApprovals.count || 0;
-  const remaining = Math.max(0, (job.linkedin_daily_limit || 28) - ((limits?.invites_sent || 0) + queuedCount));
+  const remaining = Math.max(0, (job.linkedin_daily_limit || 28) - (limits?.invites_sent || 0));
   if (!remaining) return 0;
 
   const { data: candidates } = await supabase
@@ -54,23 +62,40 @@ async function draftConnectionRequests(job) {
     .order('fit_score', { ascending: false })
     .limit(remaining);
 
-  let draftedCount = 0;
+  let sentCount = 0;
   for (const candidate of candidates || []) {
-    // eslint-disable-next-line no-await-in-loop
-    const message = await draftMessage(buildTemplateAwarePrompt(job, 'connection_request', `Write a LinkedIn connection request under 300 characters.\nCandidate: ${candidate.name}, ${candidate.current_title} at ${candidate.current_company}\nJob: ${job.job_title} at ${job.client_name}\nUse one specific hook from this profile: ${candidate.notes || candidate.tech_skills || candidate.current_company}.`));
-    if (!message) continue;
-    // eslint-disable-next-line no-await-in-loop
-    const approval = await queueApproval({
-      candidateId: candidate.id,
-      jobId: job.id,
-      channel: 'connection_request',
-      stage: 'invite_sent',
-      messageText: message.slice(0, 300),
-    });
-    if (approval) draftedCount += 1;
+    if (!candidate.linkedin_provider_id) {
+      // eslint-disable-next-line no-await-in-loop
+      await logActivity(job.id, candidate.id, 'INVITE_SEND_ERROR', `Missing LinkedIn provider id for ${candidate.name}`, {});
+      continue;
+    }
+
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const result = await sendConnectionRequest(candidate.linkedin_provider_id);
+      if (!result) throw new Error('Unipile send returned no result');
+
+      // eslint-disable-next-line no-await-in-loop
+      await supabase.from('candidates').update({
+        pipeline_stage: 'invite_sent',
+        invite_sent_at: new Date().toISOString(),
+      }).eq('id', candidate.id);
+
+      // eslint-disable-next-line no-await-in-loop
+      await incrementDailyLimit(job.id, 'connection_request');
+      // eslint-disable-next-line no-await-in-loop
+      await logActivity(job.id, candidate.id, 'INVITE_SENT', `Connection request sent to ${candidate.name}`, {
+        channel: 'connection_request',
+        autonomous: true,
+      });
+      sentCount += 1;
+    } catch (error) {
+      // eslint-disable-next-line no-await-in-loop
+      await logActivity(job.id, candidate.id, 'INVITE_SEND_ERROR', `Failed to send connection request to ${candidate.name}: ${error.message}`, {});
+    }
   }
 
-  return draftedCount;
+  return sentCount;
 }
 
 async function draftFirstDMs(job) {
@@ -234,8 +259,11 @@ export async function runJobCycle(job, runtimeState) {
     await processEnrichmentQueue(job.id);
   }
 
+  if (withinWindow && runtimeState.linkedinEnabled && runtimeState.outreachEnabled) {
+    await sendAutonomousConnectionRequests(job);
+  }
+
   if (runtimeState.linkedinEnabled && runtimeState.outreachEnabled) {
-    await draftConnectionRequests(job);
     await draftFirstDMs(job);
   }
 

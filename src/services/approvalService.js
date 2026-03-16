@@ -1,6 +1,6 @@
 import supabase from '../db/supabase.js';
 import { sendTelegramMessage, editTelegramMessage, getRecruiterChatId } from '../integrations/telegram.js';
-import { sendConnectionRequest, startLinkedInDM, sendLinkedInDM, sendEmail } from '../integrations/unipile.js';
+import { startLinkedInDM, sendLinkedInDM, sendEmail } from '../integrations/unipile.js';
 import { todayIsoDate } from '../lib_utils.js';
 import { logActivity } from './activityLogger.js';
 
@@ -83,13 +83,6 @@ async function findExistingApproval(candidateId, channel, stage) {
 async function executeSend(approval, candidate) {
   validateDraftMessage(approval.message_text, candidate);
 
-  if (approval.channel === 'connection_request') {
-    if (!candidate.linkedin_provider_id) {
-      throw new Error('Missing LinkedIn provider id for connection request');
-    }
-    return sendConnectionRequest(candidate.linkedin_provider_id, approval.message_text);
-  }
-
   if (approval.channel === 'linkedin_dm') {
     if (!candidate.linkedin_provider_id && !candidate.unipile_chat_id) {
       throw new Error('Missing LinkedIn identifiers for DM');
@@ -114,10 +107,7 @@ async function applyStageAfterSend(approval, candidate, result) {
   const updates = {};
   const now = new Date().toISOString();
 
-  if (approval.channel === 'connection_request') {
-    updates.pipeline_stage = approval.stage || 'invite_sent';
-    updates.invite_sent_at = now;
-  } else if (approval.channel === 'linkedin_dm') {
+  if (approval.channel === 'linkedin_dm') {
     updates.pipeline_stage = approval.stage || 'dm_sent';
     updates.dm_sent_at = now;
     updates.unipile_chat_id = result?.chat_id || candidate.unipile_chat_id;
@@ -131,16 +121,14 @@ async function applyStageAfterSend(approval, candidate, result) {
     await supabase.from('candidates').update(updates).eq('id', candidate.id);
   }
 
-  if (approval.channel !== 'connection_request') {
-    await supabase.from('conversations').insert({
-      candidate_id: candidate.id,
-      job_id: approval.job_id,
-      direction: 'outbound',
-      channel: approval.channel,
-      message_text: approval.message_text,
-      unipile_message_id: result?.message_id || null,
-    });
-  }
+  await supabase.from('conversations').insert({
+    candidate_id: candidate.id,
+    job_id: approval.job_id,
+    direction: 'outbound',
+    channel: approval.channel,
+    message_text: approval.message_text,
+    unipile_message_id: result?.message_id || null,
+  });
 }
 
 async function incrementDailyLimit(approval) {
@@ -154,7 +142,6 @@ async function incrementDailyLimit(approval) {
   if (!limits) return;
 
   const updates = {};
-  if (approval.channel === 'connection_request') updates.invites_sent = (limits.invites_sent || 0) + 1;
   if (approval.channel === 'linkedin_dm') updates.dms_sent = (limits.dms_sent || 0) + 1;
   if (approval.channel === 'email') updates.emails_sent = (limits.emails_sent || 0) + 1;
   if (Object.keys(updates).length) {
@@ -163,6 +150,15 @@ async function incrementDailyLimit(approval) {
 }
 
 export async function queueApproval({ candidateId, jobId, messageText, channel, stage }) {
+  if (channel === 'connection_request') {
+    await logActivity(jobId, candidateId, 'MESSAGE_SKIPPED', 'Connection requests are sent autonomously and never queued for approval', {
+      channel,
+      stage,
+      autonomous: true,
+    });
+    return null;
+  }
+
   const [{ data: candidate, error: candidateError }, { data: job, error: jobError }] = await Promise.all([
     supabase.from('candidates').select('*').eq('id', candidateId).single(),
     supabase.from('jobs').select('*').eq('id', jobId).single(),
@@ -260,6 +256,19 @@ export async function executeApprovedSends(job) {
   let sentCount = 0;
 
   for (const approval of approvals || []) {
+    if (approval.channel === 'connection_request') {
+      // Legacy queue items are ignored now that invites send autonomously.
+      // eslint-disable-next-line no-await-in-loop
+      await supabase.from('approval_queue').update({ status: 'rejected' }).eq('id', approval.id);
+      // eslint-disable-next-line no-await-in-loop
+      await logActivity(approval.job_id, approval.candidate_id, 'MESSAGE_SKIPPED', 'Legacy connection request approval ignored', {
+        approval_id: approval.id,
+        channel: approval.channel,
+        autonomous: true,
+      });
+      continue;
+    }
+
     const { candidate } = await getApprovalContext(approval);
     if (!candidate) {
       // eslint-disable-next-line no-await-in-loop

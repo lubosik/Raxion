@@ -1,9 +1,9 @@
 (function () {
   const state = {
     view: (window.location.hash || '#overview').slice(1) || 'overview',
-    jobsView: 'overview',
     stats: null,
     jobs: [],
+    jobCandidates: {},
     inbox: [],
     activity: [],
     approvals: [],
@@ -15,8 +15,10 @@
     selectedJobCandidates: [],
     selectedJobActivity: [],
     selectedJobApprovals: [],
-    selectedJobStageFilter: 'all',
-    selectedActivityFilter: 'all',
+    selectedJobTab: 'all_candidates',
+    selectedActivityGroup: 'all',
+    selectedGlobalActivityGroup: 'all',
+    selectedJobActivityType: 'all',
     candidatePanelId: null,
     candidatePanelDetail: null,
     loading: false,
@@ -26,41 +28,56 @@
   const toastWrap = document.createElement('div');
   toastWrap.className = 'toast-wrap';
   document.body.appendChild(toastWrap);
-  let savedDrafts = {};
 
-  const STAGE_COLORS = {
-    Sourced: 'stage-sourced',
-    Shortlisted: 'stage-shortlisted',
-    Enriched: 'stage-enriched',
-    invite_sent: 'stage-invite_sent',
-    invite_accepted: 'stage-invite_accepted',
-    dm_sent: 'stage-dm_sent',
-    email_sent: 'stage-email_sent',
-    Replied: 'stage-replied',
-    Qualified: 'stage-qualified',
-    Archived: 'stage-archived',
-    Rejected: 'stage-archived',
-    Placed: 'stage-qualified',
+  const STAGE_META = {
+    Sourced: { cls: 'stage-sourced', label: 'Sourced' },
+    Shortlisted: { cls: 'stage-shortlisted', label: 'Shortlisted' },
+    Enriched: { cls: 'stage-enriched', label: 'Enriched' },
+    invite_sent: { cls: 'stage-invite', label: 'Invite Sent' },
+    invite_accepted: { cls: 'stage-accepted', label: 'Invite Accepted' },
+    dm_sent: { cls: 'stage-dm', label: 'DM Sent' },
+    email_sent: { cls: 'stage-email', label: 'Email Sent' },
+    Replied: { cls: 'stage-replied', label: 'Replied' },
+    Qualified: { cls: 'stage-qualified', label: 'Qualified' },
+    Rejected: { cls: 'stage-rejected', label: 'Rejected' },
+    Archived: { cls: 'stage-archived', label: 'Archived' },
+    Withdrawn: { cls: 'stage-withdrawn', label: 'Withdrawn' },
+    Placed: { cls: 'stage-placed', label: 'Placed' },
   };
 
-  const GRADE_COLORS = {
-    HOT: 'grade-hot',
-    WARM: 'grade-warm',
-    POSSIBLE: 'grade-possible',
-    ARCHIVE: 'grade-archive',
-  };
+  const JOB_TABS = [
+    ['all_candidates', 'All Candidates'],
+    ['shortlisted', 'Shortlisted'],
+    ['ranked', 'Ranked'],
+    ['outreach', 'Outreach'],
+    ['replies', 'Replies'],
+    ['archived', 'Archived'],
+    ['activity', 'Activity'],
+    ['templates', 'Templates'],
+  ];
 
-  const PIPELINE_STAGES = [
-    'Sourced',
-    'Shortlisted',
-    'Enriched',
-    'invite_sent',
-    'invite_accepted',
-    'dm_sent',
-    'email_sent',
-    'Replied',
-    'Qualified',
-    'Archived',
+  const ACTIVITY_GROUPS = [
+    ['all', 'All Types'],
+    ['messages', 'Messages'],
+    ['enrichment', 'Enrichment'],
+    ['outreach', 'Outreach'],
+    ['replies', 'Replies'],
+    ['errors', 'Errors'],
+  ];
+
+  const JOB_ACTIVITY_TYPES = [
+    'all',
+    'AUTO_SOURCING',
+    'CANDIDATE_SOURCED',
+    'CANDIDATE_SCORED',
+    'ENRICHMENT_ATTEMPTED',
+    'MESSAGE_DRAFTED',
+    'MESSAGE_APPROVED',
+    'MESSAGE_SENT',
+    'INVITE_SENT',
+    'INVITE_ACCEPTED',
+    'REPLY_RECEIVED',
+    'MESSAGE_SEND_ERROR',
   ];
 
   function esc(value) {
@@ -70,6 +87,125 @@
       .replaceAll('>', '&gt;')
       .replaceAll('"', '&quot;')
       .replaceAll("'", '&#39;');
+  }
+
+  function request(path, options) {
+    return fetch(path, options).then(async (response) => {
+      if (!response.ok) {
+        let message = 'Request failed';
+        try {
+          const payload = await response.json();
+          message = payload.error || message;
+        } catch {
+          message = await response.text();
+        }
+        throw new Error(message);
+      }
+      return response.json();
+    });
+  }
+
+  function showToast(message, tone) {
+    const el = document.createElement('div');
+    el.className = 'toast' + (tone ? ` ${tone}` : '');
+    el.textContent = message;
+    toastWrap.appendChild(el);
+    setTimeout(() => el.remove(), 3500);
+  }
+
+  function stageInfo(stage) {
+    return STAGE_META[stage] || { cls: 'stage-default', label: stage || 'Unknown' };
+  }
+
+  function stageChip(stage) {
+    const meta = stageInfo(stage);
+    return `<span class="stage-chip ${meta.cls}">${esc(meta.label)}</span>`;
+  }
+
+  function scoreClass(score) {
+    if (score >= 75) return 'score-high';
+    if (score >= 50) return 'score-mid';
+    return 'score-low';
+  }
+
+  function scorePill(score) {
+    return `<span class="score-pill ${scoreClass(Number(score || 0))}">${Number(score || 0)}</span>`;
+  }
+
+  function initials(name) {
+    return String(name || 'Unknown')
+      .split(/\s+/)
+      .slice(0, 2)
+      .map((part) => part[0] || '')
+      .join('')
+      .toUpperCase() || 'U';
+  }
+
+  function gradeClass(grade) {
+    if (grade === 'HOT') return 'avatar-hot';
+    if (grade === 'WARM') return 'avatar-warm';
+    return 'avatar-possible';
+  }
+
+  function formatTime(value) {
+    if (!value) return '—';
+    return new Date(value).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+
+  function formatDateTime(value) {
+    if (!value) return '—';
+    return new Date(value).toLocaleString();
+  }
+
+  function statusChip(status) {
+    const mapping = {
+      ACTIVE: 'job-active',
+      PAUSED: 'job-paused',
+      CLOSED: 'job-closed',
+    };
+    return `<span class="stage-chip ${mapping[status] || 'job-closed'}">${esc(status || 'Unknown')}</span>`;
+  }
+
+  function candidateLastAction(candidate) {
+    return candidate.last_reply_at || candidate.dm_sent_at || candidate.invite_accepted_at || candidate.invite_sent_at || candidate.created_at;
+  }
+
+  function profileButton(url) {
+    return url
+      ? `<a class="btn btn-secondary btn-sm" href="${esc(url)}" target="_blank" rel="noreferrer">View Profile</a>`
+      : '<span class="muted-inline">No profile</span>';
+  }
+
+  function getActiveJobs() {
+    return (state.jobs || []).filter((job) => job.status === 'ACTIVE' && !job.paused);
+  }
+
+  function getArchivedJobs() {
+    return (state.jobs || []).filter((job) => job.status !== 'ACTIVE' || job.paused);
+  }
+
+  function getJobCandidates(jobId) {
+    return state.jobCandidates[jobId] || [];
+  }
+
+  function candidateStageCounts(candidates) {
+    const counts = {};
+    for (const candidate of candidates || []) {
+      const stage = candidate.pipeline_stage || 'Unknown';
+      counts[stage] = (counts[stage] || 0) + 1;
+    }
+    return counts;
+  }
+
+  function getJobCounts(jobId) {
+    const candidates = getJobCandidates(jobId);
+    const counts = candidateStageCounts(candidates);
+    return {
+      sourced: counts.Sourced || 0,
+      shortlisted: counts.Shortlisted || 0,
+      outreach: (counts.invite_sent || 0) + (counts.invite_accepted || 0) + (counts.dm_sent || 0) + (counts.email_sent || 0),
+      replies: (counts.Replied || 0) + (counts.Qualified || 0),
+    };
   }
 
   function parseTemplates(rawTemplates) {
@@ -82,233 +218,66 @@
     }
   }
 
-  function time(value) {
-    if (!value) return '—';
-    return new Date(value).toLocaleString();
+  function activityGroupFor(eventType) {
+    const type = String(eventType || '');
+    if (/ERROR|FAILED/.test(type)) return 'errors';
+    if (/REPLY|QUALIFIED/.test(type)) return 'replies';
+    if (/ENRICHMENT/.test(type)) return 'enrichment';
+    if (/INVITE|MESSAGE_SENT|OUTSIDE_SENDING_WINDOW/.test(type)) return 'outreach';
+    if (/MESSAGE_/.test(type)) return 'messages';
+    return 'all';
   }
 
-  function shortTime(value) {
-    if (!value) return '—';
-    return new Date(value).toLocaleString([], {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
+  function activityChipClass(eventType) {
+    const type = String(eventType || '');
+    if (type === 'MESSAGE_DRAFTED' || type === 'MESSAGE_APPROVED' || type === 'MESSAGE_SENT') return 'chip-message';
+    if (type === 'ENRICHMENT_ATTEMPTED' || type === 'CANDIDATE_ENRICHMENT_NO_DATA' || type === 'CANDIDATE_ENRICHED') return 'chip-enrichment';
+    if (type === 'INVITE_SENT') return 'chip-invite';
+    if (type === 'INVITE_ACCEPTED') return 'chip-accepted';
+    if (type === 'REPLY_RECEIVED' || type === 'CANDIDATE_QUALIFIED') return 'chip-reply';
+    if (/ERROR|FAILED/.test(type)) return 'chip-error';
+    if (type === 'OUTSIDE_SENDING_WINDOW') return 'chip-window';
+    return 'chip-default';
   }
 
-  function money(min, max, currency) {
-    if (!min && !max) return '—';
-    return [min || '—', max || '—'].join(' - ') + ' ' + (currency || 'GBP');
+  function filterActivities(items, group) {
+    if (group === 'all') return items || [];
+    return (items || []).filter((item) => activityGroupFor(item.event_type) === group);
   }
 
-  function formatUrl(url) {
-    if (!url) return 'No profile';
-    try {
-      const parsed = new URL(url);
-      return (parsed.hostname + parsed.pathname).replace(/\/$/, '').slice(0, 36) + ((parsed.hostname + parsed.pathname).length > 36 ? '...' : '');
-    } catch {
-      return 'Open profile';
-    }
+  function renderActivityRows(items) {
+    return (items || []).slice(0, 50).map((item) => {
+      const muted = item.event_type === 'OUTSIDE_SENDING_WINDOW' ? ' activity-muted' : '';
+      return (
+        `<div class="activity-event-row${muted}">` +
+          `<span class="activity-timestamp">${esc(formatTime(item.created_at))}</span>` +
+          `<span class="activity-chip ${activityChipClass(item.event_type)}">${esc(item.event_type)}</span>` +
+          `<span class="activity-description">${esc(item.summary || '')}</span>` +
+        '</div>'
+      );
+    }).join('') || '<div class="empty-state">No activity yet.</div>';
   }
 
-  function initials(name) {
-    const parts = String(name || 'Unknown').trim().split(/\s+/).slice(0, 2);
-    return parts.map((part) => part[0] || '').join('').toUpperCase() || 'U';
-  }
-
-  function badge(value, kind) {
-    const text = String(value || 'Unknown');
-    const cls = kind === 'stage'
-      ? (STAGE_COLORS[text] || 'stage-default')
-      : kind === 'grade'
-        ? (GRADE_COLORS[text] || 'grade-default')
-        : 'stage-default';
-    return '<span class="chip ' + cls + '">' + esc(text) + '</span>';
-  }
-
-  function eventBadge(value) {
-    const type = String(value || 'SYSTEM');
-    const tone = /ERROR|FAILED/.test(type)
-      ? 'event-error'
-      : /REPLY|QUALIFIED|ACCEPTED/.test(type)
-        ? 'event-positive'
-        : /DRAFT|APPROVED|SENT|ENRICHMENT/.test(type)
-          ? 'event-info'
-          : /OUTSIDE_SENDING_WINDOW/.test(type)
-            ? 'event-muted'
-            : 'event-default';
-    return '<span class="chip event-chip ' + tone + '">' + esc(type) + '</span>';
-  }
-
-  function enrichmentIcon(candidate) {
-    const status = String(candidate.enrichment_status || 'Pending');
-    const cls = status === 'Enriched' ? 'enrichment-good' : status === 'Failed' ? 'enrichment-bad' : status === 'No Data' ? 'enrichment-empty' : 'enrichment-pending';
-    return '<span class="enrichment-dot ' + cls + '" title="' + esc(status) + '"></span>';
-  }
-
-  function copyButton(url) {
-    if (!url) return '';
-    return '<button class="btn btn-secondary btn-xs" data-action="copy-url" data-url="' + esc(url) + '">Copy</button>';
-  }
-
-  function latestCandidateTimestamp(candidate) {
-    const values = [
-      candidate.last_reply_at,
-      candidate.qualified_at,
-      candidate.dm_sent_at,
-      candidate.invite_accepted_at,
-      candidate.invite_sent_at,
-      candidate.created_at,
-    ].filter(Boolean).sort().reverse();
-    return values[0] || null;
-  }
-
-  function getActiveJobs() {
-    return (state.jobs || []).filter((job) => job.status === 'ACTIVE' && !job.paused);
-  }
-
-  function getArchivedJobs() {
-    return (state.jobs || []).filter((job) => job.status !== 'ACTIVE' || job.paused);
-  }
-
-  function getSelectedJob() {
-    return state.selectedJobDetail;
-  }
-
-  function setActiveNav() {
-    document.querySelectorAll('.nav-link').forEach((link) => {
-      link.classList.toggle('active', link.dataset.view === state.view);
-    });
-  }
-
-  function showToast(message, tone) {
-    const el = document.createElement('div');
-    el.className = 'toast' + (tone ? ' ' + tone : '');
-    el.textContent = message;
-    toastWrap.appendChild(el);
-    setTimeout(() => el.remove(), 3500);
-  }
-
-  async function request(path, options) {
-    const response = await fetch(path, options);
-    if (!response.ok) {
-      let message = 'Request failed';
-      try {
-        const payload = await response.json();
-        message = payload.error || message;
-      } catch {
-        message = await response.text();
-      }
-      throw new Error(message);
-    }
-    return response.json();
-  }
-
-  function serializeForm(form) {
-    if (!form) return null;
-    const payload = {};
-    Array.from(form.elements || []).forEach((field) => {
-      if (!field.name) return;
-      payload[field.name] = field.value;
-    });
-    return payload;
-  }
-
-  function captureDrafts() {
-    savedDrafts = {
-      createJob: serializeForm(document.getElementById('job-create-form')),
-      jobAsset: serializeForm(document.getElementById('job-asset-form')),
-      jobSettings: serializeForm(document.getElementById('job-settings-form')),
-      jobTemplates: serializeForm(document.getElementById('job-templates-form')),
-    };
-  }
-
-  function restoreForm(formId, draft) {
-    const form = document.getElementById(formId);
-    if (!form || !draft) return;
-    Object.entries(draft).forEach(([name, value]) => {
-      const field = form.elements.namedItem(name);
-      if (!field || typeof value === 'undefined' || value === null) return;
-      field.value = value;
-    });
-  }
-
-  function restoreDrafts() {
-    restoreForm('job-create-form', savedDrafts.createJob);
-    restoreForm('job-asset-form', savedDrafts.jobAsset);
-    restoreForm('job-settings-form', savedDrafts.jobSettings);
-    restoreForm('job-templates-form', savedDrafts.jobTemplates);
-  }
-
-  function groupInboxThreads(items) {
-    const threads = new Map();
-    for (const item of items || []) {
-      const key = item.candidate_id || item.candidates?.id || item.id;
-      if (!threads.has(key)) {
-        threads.set(key, {
-          candidateId: item.candidate_id || item.candidates?.id || null,
-          candidateName: item.candidates?.name || 'Unknown',
-          company: item.candidates?.current_company || 'Unknown company',
-          jobTitle: item.jobs?.job_title || 'Unknown job',
-          clientName: item.jobs?.client_name || '',
-          latest: item,
-          unread: false,
-          messages: [],
-        });
-      }
-      const thread = threads.get(key);
-      thread.messages.push(item);
-      if (!item.read) thread.unread = true;
-      if (!thread.latest?.sent_at || new Date(item.sent_at) > new Date(thread.latest.sent_at)) {
-        thread.latest = item;
-      }
-    }
-    return Array.from(threads.values()).sort((a, b) => new Date(b.latest?.sent_at || 0) - new Date(a.latest?.sent_at || 0));
-  }
-
-  function recentReplyPreview(candidateId) {
-    const thread = groupInboxThreads(state.inbox).find((item) => item.candidateId === candidateId);
-    return thread?.latest?.message_text || 'No reply summary yet.';
-  }
-
-  function stageCounts(candidates) {
-    return PIPELINE_STAGES.reduce((acc, stage) => {
-      acc[stage] = (candidates || []).filter((candidate) => {
-        const pipelineStage = candidate.pipeline_stage === 'Rejected' ? 'Archived' : candidate.pipeline_stage;
-        return pipelineStage === stage;
-      }).length;
-      return acc;
-    }, {});
-  }
-
-  function renderPipelineBar(candidates) {
-    const counts = stageCounts(candidates);
-    const total = Object.values(counts).reduce((sum, value) => sum + value, 0) || 1;
+  function renderProgressBar(counts) {
+    const total = Math.max(1, counts.sourced + counts.shortlisted + counts.outreach + counts.replies);
+    const segments = [
+      ['stage-sourced', counts.sourced],
+      ['stage-shortlisted', counts.shortlisted],
+      ['stage-invite', counts.outreach],
+      ['stage-replied', counts.replies],
+    ];
     return (
-      '<div class="pipeline-bar">' +
-        PIPELINE_STAGES.map((stage) => {
-          const count = counts[stage] || 0;
-          const width = Math.max(0, (count / total) * 100);
-          return '<div class="pipeline-segment ' + (STAGE_COLORS[stage] || 'stage-default') + '" style="width:' + width + '%" title="' + esc(stage + ': ' + count) + '"></div>';
-        }).join('') +
-      '</div>' +
-      '<div class="pipeline-legend">' +
-        PIPELINE_STAGES.map((stage) => (
-          '<div class="pipeline-legend-item"><span class="pipeline-swatch ' + (STAGE_COLORS[stage] || 'stage-default') + '"></span><span>' + esc(stage) + '</span><strong>' + (counts[stage] || 0) + '</strong></div>'
-        )).join('') +
+      '<div class="mini-progress">' +
+        segments.map(([cls, count]) => `<span class="mini-progress-segment ${cls}" style="width:${(count / total) * 100}%"></span>`).join('') +
       '</div>'
     );
   }
 
-  async function loadCoreData(options) {
-    const config = { background: false, preserveDrafts: false, ...options };
-    if (!config.background) {
-      state.loading = true;
-      render();
-    }
+  async function loadCoreData() {
+    state.loading = true;
+    render();
 
-    const [stats, jobs, inbox, activity, approvals, runtime, health, runtimeConfig] = await Promise.all([
+    const [stats, jobs, inbox, activity, approvals, runtime, health, config] = await Promise.all([
       request('/api/stats'),
       request('/api/jobs'),
       request('/api/inbox'),
@@ -319,27 +288,30 @@
       request('/api/config'),
     ]);
 
+    const candidateResponses = await Promise.all(
+      (jobs || []).map(async (job) => [job.id, await request(`/api/jobs/${job.id}/candidates?limit=500`)]),
+    );
+
     state.stats = stats;
-    state.jobs = jobs;
-    state.inbox = inbox;
-    state.activity = activity;
-    state.approvals = approvals;
+    state.jobs = jobs || [];
+    state.inbox = inbox || [];
+    state.activity = activity || [];
+    state.approvals = (approvals || []).filter((item) => item.channel !== 'connection_request');
     state.runtime = runtime;
     state.health = health;
-    state.config = runtimeConfig;
-    const activeJobs = jobs.filter((job) => job.status === 'ACTIVE' && !job.paused);
-    state.selectedJobId = state.selectedJobId || activeJobs[0]?.id || jobs[0]?.id || null;
+    state.config = config || [];
+    state.jobCandidates = Object.fromEntries(candidateResponses);
+    state.selectedJobId = state.selectedJobId || getActiveJobs()[0]?.id || jobs?.[0]?.id || null;
     state.loading = false;
 
     if (state.selectedJobId) {
-      await loadSelectedJob(state.selectedJobId, { preserveDrafts: config.preserveDrafts });
-    } else {
-      render();
+      await loadSelectedJob(state.selectedJobId);
+      return;
     }
+    render();
   }
 
-  async function loadSelectedJob(jobId, options) {
-    const config = { preserveDrafts: false, ...options };
+  async function loadSelectedJob(jobId) {
     state.selectedJobId = jobId;
     if (!jobId) {
       state.selectedJobDetail = null;
@@ -351,25 +323,25 @@
     }
 
     const [job, candidates, activity, approvals] = await Promise.all([
-      request('/api/jobs/' + jobId),
-      request('/api/jobs/' + jobId + '/candidates?limit=200' + (state.selectedJobStageFilter !== 'all' ? '&stage=' + encodeURIComponent(state.selectedJobStageFilter) : '')),
-      request('/api/jobs/' + jobId + '/activity' + (state.selectedActivityFilter !== 'all' ? '?eventType=' + encodeURIComponent(state.selectedActivityFilter) : '')),
-      request('/api/jobs/' + jobId + '/approval-queue'),
+      request(`/api/jobs/${jobId}`),
+      request(`/api/jobs/${jobId}/candidates?limit=500`),
+      request(`/api/jobs/${jobId}/activity`),
+      request(`/api/jobs/${jobId}/approval-queue`),
     ]);
 
     state.selectedJobDetail = job;
-    state.selectedJobCandidates = candidates;
-    state.selectedJobActivity = activity;
-    state.selectedJobApprovals = approvals;
-
-    if (config.preserveDrafts) captureDrafts();
+    state.selectedJobCandidates = candidates || [];
+    state.selectedJobActivity = activity || [];
+    state.selectedJobApprovals = (approvals || []).filter((item) => item.channel !== 'connection_request');
+    state.jobCandidates[jobId] = candidates || [];
     render();
-    if (config.preserveDrafts) restoreDrafts();
   }
 
   async function openCandidatePanel(candidateId) {
     state.candidatePanelId = candidateId;
-    state.candidatePanelDetail = await request('/api/candidates/' + candidateId);
+    const detail = await request(`/api/candidates/${candidateId}`);
+    detail.approvals = (detail.approvals || []).filter((item) => item.channel !== 'connection_request');
+    state.candidatePanelDetail = detail;
     render();
   }
 
@@ -381,43 +353,171 @@
 
   function renderOverview() {
     const stats = state.stats || {};
-    const jobs = getActiveJobs().map((job) => (
-      '<tr>' +
-        '<td><strong>' + esc(job.job_title || job.name) + '</strong><div class="cell-sub">' + esc(job.client_name || 'No client') + '</div></td>' +
-        '<td>' + badge(job.status, 'stage') + '</td>' +
-        '<td>' + (job.metrics?.candidates_sourced || 0) + '</td>' +
-        '<td>' + (job.metrics?.outreach_sent || 0) + '</td>' +
-        '<td>' + (job.metrics?.replies || 0) + '</td>' +
-        '<td><button class="btn btn-secondary" data-action="select-job" data-job-id="' + esc(job.id) + '">Open</button></td>' +
-      '</tr>'
-    )).join('') || '<tr><td colspan="6">No active jobs yet.</td></tr>';
-
-    const latestEvents = (state.activity || []).slice(0, 12).map((item) => (
-      '<div class="event-row">' +
-        eventBadge(item.event_type) +
-        '<div class="event-summary">' + esc(item.summary || 'No summary') + '</div>' +
-        '<div class="event-time">' + shortTime(item.created_at) + '</div>' +
-      '</div>'
-    )).join('') || '<div class="notice">No activity logged yet.</div>';
+    const rows = getActiveJobs().map((job) => {
+      const counts = getJobCounts(job.id);
+      return (
+        '<tr>' +
+          `<td><strong>${esc(job.job_title || job.name)}</strong></td>` +
+          `<td>${esc(job.client_name || '—')}</td>` +
+          `<td>${statusChip(job.status)}</td>` +
+          `<td>${counts.sourced}</td>` +
+          `<td>${counts.shortlisted}</td>` +
+          `<td>${counts.outreach}</td>` +
+          `<td>${counts.replies}</td>` +
+          `<td>${renderProgressBar(counts)}</td>` +
+          `<td><button class="btn btn-primary btn-sm" data-action="open-job" data-id="${esc(job.id)}">View</button></td>` +
+        '</tr>'
+      );
+    }).join('') || '<tr><td colspan="9">No active jobs.</td></tr>';
 
     return (
       '<section class="view-section">' +
-        '<div class="metric-grid">' +
-          '<div class="metric-card"><div class="metric-label">Total Sourced</div><div class="metric-value">' + (stats.candidates_sourced || 0) + '</div></div>' +
-          '<div class="metric-card"><div class="metric-label">Outreach Sent</div><div class="metric-value">' + (stats.outreach_sent || 0) + '</div></div>' +
-          '<div class="metric-card"><div class="metric-label">Replies</div><div class="metric-value">' + (stats.replies || 0) + '</div></div>' +
-          '<div class="metric-card"><div class="metric-label">Active Jobs</div><div class="metric-value">' + (stats.active_jobs || 0) + '</div></div>' +
+        '<div class="metric-strip">' +
+          `<div class="metric-card strip-card"><div class="metric-number">${stats.candidates_sourced || 0}</div><div class="metric-caption">Total Sourced</div></div>` +
+          `<div class="metric-card strip-card"><div class="metric-number">${stats.outreach_sent || 0}</div><div class="metric-caption">Outreach Sent</div></div>` +
+          `<div class="metric-card strip-card"><div class="metric-number">${stats.replies || 0}</div><div class="metric-caption">Replies</div></div>` +
+          `<div class="metric-card strip-card"><div class="metric-number">${stats.active_jobs || 0}</div><div class="metric-caption">Active Jobs</div></div>` +
         '</div>' +
-        '<div class="overview-grid">' +
-          '<div class="table-card panel-large">' +
-            '<div class="panel-head"><div><div class="label-caps">Pipelines</div><h2 class="section-title">Open Pipelines</h2></div></div>' +
-            '<table><thead><tr><th>Job title</th><th>Status</th><th>Sourced</th><th>Outreach</th><th>Replies</th><th></th></tr></thead><tbody>' + jobs + '</tbody></table>' +
-          '</div>' +
-          '<div class="card panel-side">' +
-            '<div class="label-caps">Live Activity</div><h2 class="section-title">Latest Events</h2>' +
-            '<div id="activity-feed" class="event-feed push-top">' + latestEvents + '</div>' +
-          '</div>' +
+        '<div class="surface">' +
+          '<div class="section-head"><div><div class="label-caps">Pipelines</div><h2 class="section-title">Open Pipelines</h2></div></div>' +
+          '<div class="table-shell"><table><thead><tr><th>Job Title</th><th>Client</th><th>Status</th><th>Sourced</th><th>Shortlisted</th><th>Outreach</th><th>Replies</th><th>Progress</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
         '</div>' +
+        '<div class="surface">' +
+          '<div class="section-head"><div><div class="label-caps">Live Activity</div><h2 class="section-title">Latest Events</h2></div><select class="select" data-action="set-activity-group" data-id="overview"><option value="all"' + (state.selectedActivityGroup === 'all' ? ' selected' : '') + '>All Types</option><option value="messages"' + (state.selectedActivityGroup === 'messages' ? ' selected' : '') + '>Messages</option><option value="enrichment"' + (state.selectedActivityGroup === 'enrichment' ? ' selected' : '') + '>Enrichment</option><option value="outreach"' + (state.selectedActivityGroup === 'outreach' ? ' selected' : '') + '>Outreach</option><option value="replies"' + (state.selectedActivityGroup === 'replies' ? ' selected' : '') + '>Replies</option><option value="errors"' + (state.selectedActivityGroup === 'errors' ? ' selected' : '') + '>Errors</option></select></div>' +
+          '<div class="activity-feed">' + renderActivityRows(filterActivities(state.activity, state.selectedActivityGroup)) + '</div>' +
+        '</div>' +
+      '</section>'
+    );
+  }
+
+  function renderJobCard(job) {
+    const counts = getJobCounts(job.id);
+    const borderClass = job.status === 'ACTIVE' ? 'job-border-active' : job.status === 'PAUSED' ? 'job-border-paused' : 'job-border-closed';
+    return (
+      '<article class="job-card ' + borderClass + '">' +
+        `<div class="job-card-head"><div><h3 class="job-card-title">${esc(job.job_title || job.name)}</h3><div class="job-card-sub">${esc(job.client_name || 'Unknown client')} · ${esc(job.location || 'No location')}</div></div>${statusChip(job.status)}</div>` +
+        '<div class="job-bars">' +
+          `<div class="job-bar-row"><span>${renderProgressBar({ sourced: counts.sourced, shortlisted: 0, outreach: 0, replies: 0 })}</span><strong>${counts.sourced} sourced</strong></div>` +
+          `<div class="job-bar-row"><span>${renderProgressBar({ sourced: 0, shortlisted: counts.shortlisted, outreach: 0, replies: 0 })}</span><strong>${counts.shortlisted} shortlisted</strong></div>` +
+          `<div class="job-bar-row"><span>${renderProgressBar({ sourced: 0, shortlisted: 0, outreach: counts.outreach, replies: 0 })}</span><strong>${counts.outreach} outreach</strong></div>` +
+        '</div>' +
+        `<div class="button-row"><button class="btn btn-primary btn-sm" data-action="open-job" data-id="${esc(job.id)}">View</button><button class="btn btn-secondary btn-sm" data-action="source-now" data-id="${esc(job.id)}">Source Now</button><button class="btn btn-danger btn-sm" data-action="close-job" data-id="${esc(job.id)}">Close</button></div>` +
+      '</article>'
+    );
+  }
+
+  function renderCandidateTable(candidates, options = {}) {
+    const { showJob = false, archived = false, outreach = false, replies = false } = options;
+    const rows = (candidates || []).map((candidate) => {
+      const detailLines = [
+        candidate.current_title || 'No title',
+        candidate.current_company || 'No company',
+      ].filter(Boolean).join(' · ');
+      const job = state.jobs.find((item) => item.id === candidate.job_id);
+      return (
+        '<tr>' +
+          `<td><div class="candidate-primary"><button class="text-link candidate-name" data-action="open-candidate" data-id="${esc(candidate.id)}">${esc(candidate.name || 'Unknown')}</button><div class="candidate-sub">${esc(detailLines)}</div></div></td>` +
+          (showJob ? `<td>${esc(job?.job_title || '—')}</td>` : '') +
+          `<td>${esc(candidate.current_company || '—')}</td>` +
+          `<td>${scorePill(candidate.fit_score)}</td>` +
+          `<td>${stageChip(candidate.pipeline_stage)}</td>` +
+          `<td><span class="enrichment-mark ${candidate.enrichment_status === 'Enriched' ? 'good' : candidate.enrichment_status === 'No Data' ? 'empty' : candidate.enrichment_status === 'Failed' ? 'bad' : 'pending'}"></span></td>` +
+          (archived ? `<td>${esc((candidate.notes || '').slice(0, 80) || 'Archived')}</td>` : '') +
+          (outreach ? `<td>${esc(candidate.pipeline_stage.includes('email') ? 'Email' : 'LinkedIn')}</td><td>${esc(formatTime(candidateLastAction(candidate)))}</td><td>${esc(formatTime(candidate.follow_up_due_at))}</td>` : '') +
+          (replies ? `<td>${esc(((state.inbox.find((item) => item.candidate_id === candidate.id) || {}).message_text || '').slice(0, 80) || 'No reply summary')}</td><td>${candidate.pipeline_stage === 'Qualified' ? '<span class="stage-chip stage-qualified">Yes</span>' : '<span class="stage-chip stage-sourced">No</span>'}</td><td>${stageChip(candidate.pipeline_stage)}</td>` : '') +
+          `<td>${esc(formatTime(candidateLastAction(candidate)))}</td>` +
+          `<td><div class="button-row">${profileButton(candidate.linkedin_url)}<button class="btn btn-secondary btn-sm" data-action="${archived ? 'reinstate-candidate' : 'archive-candidate'}" data-id="${esc(candidate.id)}">${archived ? 'Reinstate' : 'Archive'}</button></div></td>` +
+        '</tr>'
+      );
+    }).join('') || '<tr><td colspan="' + (showJob ? '8' : archived ? '8' : outreach ? '10' : replies ? '10' : '7') + '">No candidates in this view.</td></tr>';
+
+    return (
+      '<div class="table-shell"><table><thead><tr>' +
+        '<th>Name</th>' +
+        (showJob ? '<th>Job</th>' : '') +
+        '<th>Company</th><th>Score</th><th>Stage</th><th>Enriched</th>' +
+        (archived ? '<th>Reason Archived</th>' : '') +
+        (outreach ? '<th>Channel</th><th>Last Action</th><th>Next Follow-up</th>' : '') +
+        (replies ? '<th>Reply Summary</th><th>Qualified</th><th>Next Action</th>' : '') +
+        '<th>Last Activity</th><th>Actions</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table></div>'
+    );
+  }
+
+  function renderJobDetail() {
+    const job = state.selectedJobDetail;
+    if (!job) return '<div class="empty-state">Select a job to inspect the pipeline.</div>';
+
+    const all = state.selectedJobCandidates || [];
+    const shortlisted = all.filter((candidate) => Number(candidate.fit_score || 0) >= 60);
+    const ranked = [...all].sort((a, b) => Number(b.fit_score || 0) - Number(a.fit_score || 0));
+    const outreach = all.filter((candidate) => ['invite_sent', 'invite_accepted', 'dm_sent', 'email_sent'].includes(candidate.pipeline_stage));
+    const replies = all.filter((candidate) => ['Replied', 'Qualified'].includes(candidate.pipeline_stage));
+    const archived = all.filter((candidate) => ['Archived', 'Rejected', 'Withdrawn'].includes(candidate.pipeline_stage));
+    const templates = parseTemplates(job.outreach_templates);
+
+    let content = '';
+    if (state.selectedJobTab === 'shortlisted') {
+      content = renderCandidateTable(shortlisted);
+    } else if (state.selectedJobTab === 'ranked') {
+      content = renderCandidateTable(ranked);
+    } else if (state.selectedJobTab === 'outreach') {
+      content = renderCandidateTable(outreach, { outreach: true });
+    } else if (state.selectedJobTab === 'replies') {
+      content = renderCandidateTable(replies, { replies: true });
+    } else if (state.selectedJobTab === 'archived') {
+      content = renderCandidateTable(archived, { archived: true });
+    } else if (state.selectedJobTab === 'activity') {
+      const filtered = state.selectedJobActivityType === 'all'
+        ? state.selectedJobActivity
+        : state.selectedJobActivity.filter((item) => item.event_type === state.selectedJobActivityType);
+      content = (
+        '<div class="surface">' +
+          '<div class="section-head"><div><div class="label-caps">Activity</div><h2 class="section-title">Job Activity</h2></div><select class="select" data-action="set-job-activity-filter" data-id="' + esc(job.id) + '">' +
+          JOB_ACTIVITY_TYPES.map((type) => `<option value="${esc(type)}"${state.selectedJobActivityType === type ? ' selected' : ''}>${esc(type === 'all' ? 'All Types' : type)}</option>`).join('') +
+          '</select></div>' +
+          '<div class="activity-feed">' + renderActivityRows(filtered) + '</div></div>'
+      );
+    } else if (state.selectedJobTab === 'templates') {
+      content = (
+        '<form id="job-templates-form" class="surface form-grid" data-job-id="' + esc(job.id) + '">' +
+          '<div class="form-span-2"><div class="label-caps">Templates</div><h2 class="section-title">Message Templates</h2></div>' +
+          '<label class="form-span-2"><span>LinkedIn DM</span><textarea class="input textarea" name="linkedin_dm">' + esc(templates.linkedin_dm || '') + '</textarea></label>' +
+          '<label class="form-span-2"><span>Email</span><textarea class="input textarea" name="email">' + esc(templates.email || '') + '</textarea></label>' +
+          '<label class="form-span-2"><span>Follow-up</span><textarea class="input textarea" name="follow_up">' + esc(templates.follow_up || '') + '</textarea></label>' +
+          '<div class="form-span-2 button-row"><button class="btn btn-primary" type="submit">Save Templates</button></div>' +
+        '</form>'
+      );
+    } else {
+      content = renderCandidateTable(all);
+    }
+
+    return (
+      '<section class="view-section">' +
+        '<div class="job-detail-header surface">' +
+          '<div><div class="label-caps">Job Detail</div><h2 class="section-title">' + esc(job.job_title || job.name) + '</h2><div class="job-detail-sub">' + esc(job.client_name || 'Unknown client') + ' · ' + esc(job.location || 'No location') + '</div></div>' +
+          '<div class="button-row"><button class="btn btn-primary btn-sm" data-action="source-now" data-id="' + esc(job.id) + '">Source Now</button><button class="btn btn-secondary btn-sm" data-action="close-job" data-id="' + esc(job.id) + '">Close</button></div>' +
+        '</div>' +
+        '<div class="tab-row">' + JOB_TABS.map(([key, label]) => `<button class="tab-button${state.selectedJobTab === key ? ' active' : ''}" data-action="set-job-tab" data-id="${esc(key)}">${esc(label)}</button>`).join('') + '</div>' +
+        content +
+      '</section>'
+    );
+  }
+
+  function renderJobs() {
+    return (
+      '<section class="view-section">' +
+        '<div class="jobs-grid">' + getActiveJobs().map(renderJobCard).join('') + '</div>' +
+        renderJobDetail() +
+      '</section>'
+    );
+  }
+
+  function renderPipeline() {
+    const candidates = Object.values(state.jobCandidates).flat();
+    return (
+      '<section class="view-section">' +
+        '<div class="surface"><div class="section-head"><div><div class="label-caps">Pipeline</div><h2 class="section-title">All Candidates</h2></div></div>' + renderCandidateTable(candidates, { showJob: true }) + '</div>' +
       '</section>'
     );
   }
@@ -425,403 +525,90 @@
   function renderArchived() {
     const rows = getArchivedJobs().map((job) => (
       '<tr>' +
-        '<td><strong>' + esc(job.job_title || job.name) + '</strong><div class="cell-sub">' + esc(job.client_name || 'No client') + '</div></td>' +
-        '<td>' + badge(job.status, 'stage') + '</td>' +
-        '<td>' + time(job.closed_at || job.created_at) + '</td>' +
-        '<td>' + (job.metrics?.candidates_sourced || 0) + '</td>' +
-        '<td><button class="btn btn-secondary" data-action="select-job" data-job-id="' + esc(job.id) + '">Open</button></td>' +
+      `<td><strong>${esc(job.job_title || job.name)}</strong></td>` +
+      `<td>${esc(job.client_name || '—')}</td>` +
+      `<td>${statusChip(job.status)}</td>` +
+      `<td>${esc(formatDateTime(job.closed_at || job.created_at))}</td>` +
+      `<td><button class="btn btn-secondary btn-sm" data-action="open-job" data-id="${esc(job.id)}">View</button></td>` +
       '</tr>'
-    )).join('') || '<tr><td colspan="5">No archived jobs yet.</td></tr>';
-
-    return (
-      '<section class="view-section">' +
-        '<div class="table-card">' +
-          '<div class="panel-head"><div><div class="label-caps">Archived</div><h2 class="section-title">Closed and Paused Searches</h2></div></div>' +
-          '<table><thead><tr><th>Job</th><th>Status</th><th>Closed</th><th>Sourced</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>' +
-        '</div>' +
-      '</section>'
-    );
-  }
-
-  function renderJobForm() {
-    return (
-      '<form id="job-create-form" class="card form-grid">' +
-        '<div class="form-span-2"><div class="label-caps">Launch Job</div><h2 class="section-title">Create New Search</h2></div>' +
-        '<label><span>Job title</span><input class="input" name="job_title" required /></label>' +
-        '<label><span>Client name</span><input class="input" name="client_name" /></label>' +
-        '<label><span>Location</span><input class="input" name="location" /></label>' +
-        '<label><span>Seniority</span><input class="input" name="seniority_level" /></label>' +
-        '<label><span>Salary min</span><input class="input" name="salary_min" type="number" /></label>' +
-        '<label><span>Salary max</span><input class="input" name="salary_max" type="number" /></label>' +
-        '<label><span>Send from</span><input class="input" name="send_from" type="time" value="08:00" /></label>' +
-        '<label><span>Send until</span><input class="input" name="send_until" type="time" value="18:00" /></label>' +
-        '<label><span>Timezone</span><input class="input" name="timezone" value="Europe/London" /></label>' +
-        '<label><span>Active days</span><input class="input" name="active_days" value="Mon,Tue,Wed,Thu,Fri" /></label>' +
-        '<label class="form-span-2"><span>Must-have stack</span><input class="input" name="tech_stack_must" placeholder="Node.js, TypeScript, PostgreSQL" /></label>' +
-        '<label class="form-span-2"><span>Candidate profile</span><textarea class="input textarea" name="candidate_profile" placeholder="Who are we targeting and why?"></textarea></label>' +
-        '<label class="form-span-2"><span>Full job description</span><textarea class="input textarea" name="full_job_description" placeholder="Paste the brief or core hiring context"></textarea></label>' +
-        '<div class="form-span-2 button-row"><button class="btn btn-primary" type="submit">Create Job</button></div>' +
-      '</form>'
-    );
-  }
-
-  function renderCandidateRow(candidate) {
-    const normalizedStage = candidate.pipeline_stage === 'Rejected' ? 'Archived' : candidate.pipeline_stage;
-    return (
-      '<tr>' +
-        '<td>' +
-          '<div class="person-cell">' +
-            '<div class="avatar ' + (GRADE_COLORS[candidate.fit_grade] || 'grade-default') + '">' + esc(initials(candidate.name)) + '</div>' +
-            '<div>' +
-              '<button class="text-link person-name" data-action="open-candidate" data-id="' + esc(candidate.id) + '">' + esc(candidate.name || 'Unknown') + '</button>' +
-              '<div class="cell-sub truncate-one">' + esc((candidate.current_title || 'No title') + ' at ' + (candidate.current_company || 'Unknown company')) + '</div>' +
-            '</div>' +
-          '</div>' +
-        '</td>' +
-        '<td><span class="score-pill">' + (candidate.fit_score || 0) + '</span></td>' +
-        '<td>' + badge(candidate.fit_grade || 'UNKNOWN', 'grade') + '</td>' +
-        '<td>' + badge(normalizedStage || 'Unknown', 'stage') + '</td>' +
-        '<td>' + enrichmentIcon(candidate) + '</td>' +
-        '<td>' + shortTime(latestCandidateTimestamp(candidate)) + '</td>' +
-        '<td>' +
-          '<div class="button-row">' +
-            '<a class="btn btn-secondary btn-xs" target="_blank" rel="noreferrer" href="' + esc(candidate.linkedin_url || '#') + '">View Profile</a>' +
-            '<button class="btn btn-secondary btn-xs" data-action="archive-candidate" data-id="' + esc(candidate.id) + '">Skip</button>' +
-            '<button class="btn btn-primary btn-xs" data-action="approve-candidate" data-id="' + esc(candidate.id) + '">Approve</button>' +
-          '</div>' +
-        '</td>' +
-      '</tr>'
-    );
-  }
-
-  function renderOutreachRows(candidates) {
-    return candidates.map((candidate) => (
-      '<tr>' +
-        '<td><button class="text-link" data-action="open-candidate" data-id="' + esc(candidate.id) + '">' + esc(candidate.name || 'Unknown') + '</button></td>' +
-        '<td>' + badge(candidate.pipeline_stage, 'stage') + '</td>' +
-        '<td>' + shortTime(latestCandidateTimestamp(candidate)) + '</td>' +
-        '<td>' + shortTime(candidate.follow_up_due_at) + '</td>' +
-        '<td>' + esc(candidate.pipeline_stage === 'email_sent' ? 'Email' : 'LinkedIn') + '</td>' +
-      '</tr>'
-    )).join('') || '<tr><td colspan="5">No active outreach in flight.</td></tr>';
-  }
-
-  function renderReplyRows(candidates) {
-    return candidates.map((candidate) => (
-      '<tr>' +
-        '<td><button class="text-link" data-action="open-candidate" data-id="' + esc(candidate.id) + '">' + esc(candidate.name || 'Unknown') + '</button></td>' +
-        '<td>' + esc(candidate.current_company || 'Unknown company') + '</td>' +
-        '<td class="truncate-one">' + esc(recentReplyPreview(candidate.id).slice(0, 120)) + '</td>' +
-        '<td>' + (candidate.pipeline_stage === 'Qualified' ? 'Yes' : 'No') + '</td>' +
-        '<td>' + badge(candidate.pipeline_stage, 'stage') + '</td>' +
-      '</tr>'
-    )).join('') || '<tr><td colspan="5">No replies yet.</td></tr>';
-  }
-
-  function renderActivityRows(items) {
-    return (items || []).map((item) => (
-      '<div class="activity-entry">' +
-        '<div class="activity-meta">' + shortTime(item.created_at) + '</div>' +
-        eventBadge(item.event_type) +
-        '<div class="activity-summary">' + esc(item.summary || '') + '</div>' +
-      '</div>'
-    )).join('') || '<div class="notice">No activity for this job yet.</div>';
-  }
-
-  function renderJobOverview(job, candidates) {
-    const counts = stageCounts(candidates);
-    return (
-      '<div class="detail-stack">' +
-        '<div class="metric-grid">' +
-          '<div class="metric-card"><div class="metric-label">Sourced</div><div class="metric-value">' + (job.metrics?.candidates_sourced || 0) + '</div></div>' +
-          '<div class="metric-card"><div class="metric-label">Outreach Sent</div><div class="metric-value">' + (job.metrics?.outreach_sent || 0) + '</div></div>' +
-          '<div class="metric-card"><div class="metric-label">Replies</div><div class="metric-value">' + (job.metrics?.replies || 0) + '</div></div>' +
-          '<div class="metric-card"><div class="metric-label">Approvals Pending</div><div class="metric-value">' + (job.metrics?.approval_queue_count || 0) + '</div></div>' +
-        '</div>' +
-        '<div class="split split-rail">' +
-          '<div class="card">' +
-            '<div class="label-caps">Pipeline Snapshot</div><h2 class="section-title">Stage Breakdown</h2>' +
-            '<div class="push-top">' + renderPipelineBar(candidates) + '</div>' +
-            '<div class="snapshot-grid push-top">' +
-              '<div class="snapshot-row"><span>Shortlisted</span><strong>' + (counts.Shortlisted || 0) + '</strong></div>' +
-              '<div class="snapshot-row"><span>Invites Sent</span><strong>' + (counts.invite_sent || 0) + '</strong></div>' +
-              '<div class="snapshot-row"><span>Invite Accepted</span><strong>' + (counts.invite_accepted || 0) + '</strong></div>' +
-              '<div class="snapshot-row"><span>Replies</span><strong>' + (counts.Replied || 0) + '</strong></div>' +
-            '</div>' +
-          '</div>' +
-          '<form id="job-settings-form" class="card form-grid" data-job-id="' + esc(job.id) + '">' +
-            '<div class="form-span-2"><div class="label-caps">Job Settings</div><h2 class="section-title">Sending Window</h2></div>' +
-            '<label><span>Send from</span><input class="input" name="send_from" type="time" value="' + esc(job.send_from || '08:00') + '" /></label>' +
-            '<label><span>Send until</span><input class="input" name="send_until" type="time" value="' + esc(job.send_until || '18:00') + '" /></label>' +
-            '<label><span>Timezone</span><input class="input" name="timezone" value="' + esc(job.timezone || 'Europe/London') + '" /></label>' +
-            '<label><span>Active days</span><input class="input" name="active_days" value="' + esc(job.active_days || 'Mon,Tue,Wed,Thu,Fri') + '" /></label>' +
-            '<label><span>LinkedIn daily limit</span><input class="input" name="linkedin_daily_limit" type="number" value="' + esc(job.linkedin_daily_limit || 28) + '" /></label>' +
-            '<label><span>Status</span><input class="input" name="status" value="' + esc(job.status || 'ACTIVE') + '" readonly /></label>' +
-            '<div class="form-span-2 button-row"><button class="btn btn-primary" type="submit">Save Settings</button></div>' +
-          '</form>' +
-        '</div>' +
-      '</div>'
-    );
-  }
-
-  function renderJobDetail() {
-    const job = getSelectedJob();
-    if (!job) return '<div class="notice">Create a job or select one to inspect the pipeline.</div>';
-
-    const templates = parseTemplates(job.outreach_templates);
-    const candidates = state.selectedJobCandidates || [];
-    const shortlisted = candidates
-      .filter((candidate) => (candidate.fit_score || 0) >= 60 && ['Shortlisted', 'Enriched', 'invite_sent', 'invite_accepted', 'dm_sent', 'email_sent', 'Replied', 'Qualified'].includes(candidate.pipeline_stage))
-      .sort((a, b) => (b.fit_score || 0) - (a.fit_score || 0));
-    const outreach = candidates.filter((candidate) => ['invite_sent', 'invite_accepted', 'dm_sent', 'email_sent'].includes(candidate.pipeline_stage));
-    const replies = candidates.filter((candidate) => ['Replied', 'Qualified'].includes(candidate.pipeline_stage));
-    const activityFilters = ['all', 'AUTO_SOURCING', 'CANDIDATE_SOURCED', 'CANDIDATE_SCORED', 'ENRICHMENT_ATTEMPTED', 'MESSAGE_DRAFTED', 'MESSAGE_APPROVED', 'MESSAGE_SENT', 'INVITE_ACCEPTED', 'REPLY_RECEIVED', 'MESSAGE_SEND_ERROR'];
-
-    const tabs = [
-      ['overview', 'Overview'],
-      ['rankings', 'Rankings'],
-      ['outreach', 'Outreach'],
-      ['replies', 'Replies'],
-      ['activity', 'Activity'],
-      ['templates', 'Templates'],
-      ['assets', 'Assets'],
-    ].map(([value, label]) => (
-      '<button class="btn filter-pill ' + (state.jobsView === value ? 'active' : '') + '" data-action="set-job-view" data-job-view="' + esc(value) + '">' + esc(label) + '</button>'
-    )).join('');
-
-    const assetRows = (job.assets || []).map((asset) => (
-      '<tr>' +
-        '<td>' + esc(asset.name) + '</td>' +
-        '<td>' + badge(asset.asset_type, 'stage') + '</td>' +
-        '<td><a class="text-link" href="' + esc(asset.url) + '" target="_blank" rel="noreferrer">' + esc(formatUrl(asset.url)) + '</a> ' + copyButton(asset.url) + '</td>' +
-        '<td><button class="btn btn-secondary btn-xs" data-action="delete-asset" data-asset-id="' + esc(asset.id) + '">Remove</button></td>' +
-      '</tr>'
-    )).join('') || '<tr><td colspan="4">No job assets yet.</td></tr>';
-
-    let body = '';
-    if (state.jobsView === 'rankings') {
-      body =
-        '<div class="table-card">' +
-          '<div class="panel-head"><div><div class="label-caps">Rankings</div><h2 class="section-title">Shortlisted Candidates</h2></div></div>' +
-          '<table><thead><tr><th>Name</th><th>Score</th><th>Fit Grade</th><th>Stage</th><th>Enriched</th><th>Last Activity</th><th>Actions</th></tr></thead><tbody>' + (shortlisted.map(renderCandidateRow).join('') || '<tr><td colspan="7">No shortlisted candidates yet.</td></tr>') + '</tbody></table>' +
-        '</div>';
-    } else if (state.jobsView === 'outreach') {
-      body =
-        '<div class="table-card">' +
-          '<div class="panel-head"><div><div class="label-caps">Outreach</div><h2 class="section-title">Candidates in Outreach</h2></div></div>' +
-          '<table><thead><tr><th>Name</th><th>Stage</th><th>Last Action</th><th>Next Follow-up</th><th>Channel</th></tr></thead><tbody>' + renderOutreachRows(outreach) + '</tbody></table>' +
-        '</div>';
-    } else if (state.jobsView === 'replies') {
-      body =
-        '<div class="table-card">' +
-          '<div class="panel-head"><div><div class="label-caps">Replies</div><h2 class="section-title">Active Conversations</h2></div></div>' +
-          '<table><thead><tr><th>Name</th><th>Company</th><th>Reply Summary</th><th>Qualified</th><th>Next Action</th></tr></thead><tbody>' + renderReplyRows(replies) + '</tbody></table>' +
-        '</div>';
-    } else if (state.jobsView === 'activity') {
-      body =
-        '<div class="card">' +
-          '<div class="panel-head"><div><div class="label-caps">Activity</div><h2 class="section-title">Job Timeline</h2></div><div class="filters">' + activityFilters.map((filter) => (
-            '<button class="btn filter-pill ' + (state.selectedActivityFilter === filter ? 'active' : '') + '" data-action="set-activity-filter" data-id="' + esc(filter) + '">' + esc(filter === 'all' ? 'All' : filter.replaceAll('_', ' ')) + '</button>'
-          )).join('') + '</div></div>' +
-          '<div class="activity-list push-top">' + renderActivityRows(state.selectedJobActivity) + '</div>' +
-        '</div>';
-    } else if (state.jobsView === 'templates') {
-      body =
-        '<form id="job-templates-form" class="card form-grid" data-job-id="' + esc(job.id) + '">' +
-          '<div class="form-span-2"><div class="label-caps">Templates</div><h2 class="section-title">Outreach Guidance</h2></div>' +
-          '<label class="form-span-2"><span>Connection request guidance</span><textarea class="input textarea" name="connection_request">' + esc(templates.connection_request || '') + '</textarea></label>' +
-          '<label class="form-span-2"><span>LinkedIn DM guidance</span><textarea class="input textarea" name="linkedin_dm">' + esc(templates.linkedin_dm || '') + '</textarea></label>' +
-          '<label class="form-span-2"><span>Email guidance</span><textarea class="input textarea" name="email">' + esc(templates.email || '') + '</textarea></label>' +
-          '<label class="form-span-2"><span>Follow-up guidance</span><textarea class="input textarea" name="follow_up">' + esc(templates.follow_up || '') + '</textarea></label>' +
-          '<div class="form-span-2 button-row"><button class="btn btn-primary" type="submit">Save Templates</button></div>' +
-        '</form>';
-    } else if (state.jobsView === 'assets') {
-      body =
-        '<div class="split split-rail">' +
-          '<div class="table-card">' +
-            '<div class="panel-head"><div><div class="label-caps">Assets</div><h2 class="section-title">Links and Collateral</h2></div></div>' +
-            '<table><thead><tr><th>Name</th><th>Type</th><th>Link</th><th></th></tr></thead><tbody>' + assetRows + '</tbody></table>' +
-          '</div>' +
-          '<form id="job-asset-form" class="card form-grid" data-job-id="' + esc(job.id) + '">' +
-            '<div class="form-span-2"><div class="label-caps">Add Asset</div><h2 class="section-title">Calendly, JD, or useful links</h2></div>' +
-            '<label><span>Name</span><input class="input" name="name" required /></label>' +
-            '<label><span>Type</span><select class="input" name="asset_type"><option value="calendly">Calendly</option><option value="jd">JD</option><option value="video">Video</option><option value="image">Image</option><option value="link">Link</option><option value="other">Other</option></select></label>' +
-            '<label class="form-span-2"><span>URL</span><input class="input" name="url" type="url" required /></label>' +
-            '<label class="form-span-2"><span>Description</span><textarea class="input textarea" name="description"></textarea></label>' +
-            '<div class="form-span-2 button-row"><button class="btn btn-primary" type="submit">Save Asset</button></div>' +
-          '</form>' +
-        '</div>';
-    } else {
-      body = renderJobOverview(job, candidates);
-    }
-
-    return (
-      '<div class="detail-stack">' +
-        '<div class="card hero-card">' +
-          '<div class="hero-head">' +
-            '<div>' +
-              '<div class="label-caps">Selected Job</div>' +
-              '<h2 class="section-title">' + esc(job.job_title || job.name) + '</h2>' +
-              '<div class="hero-sub">' + esc(job.client_name || 'No client') + ' · ' + esc(job.location || 'No location') + ' · ' + money(job.salary_min, job.salary_max, job.currency) + '</div>' +
-              '<div class="hero-sub">Send window: ' + esc(job.send_from || '08:00') + ' to ' + esc(job.send_until || '18:00') + ' · ' + esc(job.timezone || 'Europe/London') + ' · ' + esc(job.active_days || 'Mon,Tue,Wed,Thu,Fri') + '</div>' +
-            '</div>' +
-            '<div class="button-row">' +
-              '<button class="btn btn-primary" data-action="source-now" data-job-id="' + esc(job.id) + '">Source Now</button>' +
-              (job.status === 'ACTIVE' ? '<button class="btn btn-secondary" data-action="close-job" data-job-id="' + esc(job.id) + '">Close Job</button>' : '') +
-              '<button class="btn btn-secondary" data-action="delete-job" data-job-id="' + esc(job.id) + '">Delete Job</button>' +
-            '</div>' +
-          '</div>' +
-          '<div class="filters push-top">' + tabs + '</div>' +
-        '</div>' +
-        body +
-      '</div>'
-    );
-  }
-
-  function renderJobs() {
-    const rows = getActiveJobs().map((job) => (
-      '<tr>' +
-        '<td><strong>' + esc(job.job_title || job.name) + '</strong><div class="cell-sub">' + esc(job.client_name || 'No client') + '</div></td>' +
-        '<td>' + badge(job.status, 'stage') + '</td>' +
-        '<td>' + (job.metrics?.candidates_sourced || 0) + '</td>' +
-        '<td>' + (job.metrics?.outreach_sent || 0) + '</td>' +
-        '<td>' + (job.metrics?.replies || 0) + '</td>' +
-        '<td><button class="btn btn-secondary" data-action="select-job" data-job-id="' + esc(job.id) + '">Open</button></td>' +
-      '</tr>'
-    )).join('') || '<tr><td colspan="6">No jobs yet.</td></tr>';
-
-    return (
-      '<section class="view-section">' +
-        '<div class="split split-rail">' +
-          renderJobForm() +
-          '<div class="table-card">' +
-            '<div class="panel-head"><div><div class="label-caps">Active Jobs</div><h2 class="section-title">Pipeline Directory</h2></div></div>' +
-            '<table><thead><tr><th>Job</th><th>Status</th><th>Sourced</th><th>Outreach</th><th>Replies</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>' +
-          '</div>' +
-        '</div>' +
-        renderJobDetail() +
-      '</section>'
-    );
+    )).join('') || '<tr><td colspan="5">No archived jobs.</td></tr>';
+    return '<section class="view-section"><div class="surface"><div class="section-head"><div><div class="label-caps">Archived</div><h2 class="section-title">Closed and Paused Jobs</h2></div></div><div class="table-shell"><table><thead><tr><th>Job</th><th>Client</th><th>Status</th><th>Closed</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div></div></section>';
   }
 
   function renderInbox() {
-    const rows = groupInboxThreads(state.inbox).map((thread) => (
-      '<div class="thread-row ' + (thread.unread ? 'thread-unread' : '') + '">' +
-        '<div class="thread-main">' +
-          '<button class="text-link person-name" data-action="open-candidate" data-id="' + esc(thread.candidateId) + '">' + esc(thread.candidateName) + '</button>' +
-          '<div class="cell-sub">' + esc(thread.company) + ' · ' + esc(thread.jobTitle) + '</div>' +
-          '<div class="thread-preview">' + esc((thread.latest?.message_text || '').slice(0, 100)) + '</div>' +
-        '</div>' +
-        '<div class="thread-meta">' +
-          '<div>' + shortTime(thread.latest?.sent_at) + '</div>' +
-          '<div>' + esc(thread.clientName || '—') + '</div>' +
-        '</div>' +
-      '</div>'
-    )).join('') || '<div class="notice">No inbound messages yet.</div>';
-
+    const rows = (state.inbox || []).reduce((map, item) => {
+      const key = item.candidate_id || item.candidates?.id || item.id;
+      if (!map[key] || new Date(item.sent_at) > new Date(map[key].sent_at || 0)) map[key] = item;
+      return map;
+    }, {});
     return (
-      '<section class="view-section">' +
-        '<div class="card">' +
-          '<div class="label-caps">Inbox</div><h2 class="section-title">Conversation Threads</h2>' +
-          '<div class="thread-list push-top">' + rows + '</div>' +
-        '</div>' +
-      '</section>'
+      '<section class="view-section"><div class="surface"><div class="section-head"><div><div class="label-caps">Inbox</div><h2 class="section-title">Conversation Threads</h2></div></div><div class="thread-list">' +
+      Object.values(rows).map((item) => (
+        '<div class="thread-card">' +
+          `<button class="text-link candidate-name" data-action="open-candidate" data-id="${esc(item.candidate_id || item.candidates?.id)}">${esc(item.candidates?.name || 'Unknown')}</button>` +
+          `<div class="candidate-sub">${esc(item.candidates?.current_company || 'Unknown company')} · ${esc(item.jobs?.job_title || 'Unknown job')}</div>` +
+          `<div class="thread-preview">${esc((item.message_text || '').slice(0, 100))}</div>` +
+          `<div class="thread-meta">${esc(formatTime(item.sent_at))}</div>` +
+        '</div>'
+      )).join('') +
+      '</div></div></section>'
     );
   }
 
   function renderActivity() {
     return (
       '<section class="view-section">' +
-        '<div class="card">' +
-          '<div class="label-caps">Activity</div><h2 class="section-title">Global Feed</h2>' +
-          '<div class="activity-list push-top">' + renderActivityRows(state.activity) + '</div>' +
+        '<div class="surface">' +
+          '<div class="section-head"><div><div class="label-caps">Activity</div><h2 class="section-title">Global Activity Feed</h2></div><select class="select" data-action="set-activity-group" data-id="global"><option value="all"' + (state.selectedGlobalActivityGroup === 'all' ? ' selected' : '') + '>All Types</option><option value="messages"' + (state.selectedGlobalActivityGroup === 'messages' ? ' selected' : '') + '>Messages</option><option value="enrichment"' + (state.selectedGlobalActivityGroup === 'enrichment' ? ' selected' : '') + '>Enrichment</option><option value="outreach"' + (state.selectedGlobalActivityGroup === 'outreach' ? ' selected' : '') + '>Outreach</option><option value="replies"' + (state.selectedGlobalActivityGroup === 'replies' ? ' selected' : '') + '>Replies</option><option value="errors"' + (state.selectedGlobalActivityGroup === 'errors' ? ' selected' : '') + '>Errors</option></select></div>' +
+          '<div class="activity-feed">' + renderActivityRows(filterActivities(state.activity, state.selectedGlobalActivityGroup)) + '</div>' +
         '</div>' +
       '</section>'
     );
   }
 
   function renderApprovals() {
-    const rows = (state.approvals || []).map((item) => (
-      '<tr>' +
-        '<td>' + esc(item.candidates?.name || 'Unknown') + '<div class="cell-sub">' + esc(item.jobs?.job_title || 'Unknown job') + '</div></td>' +
-        '<td>' + badge(item.channel, 'stage') + '</td>' +
-        '<td>' + badge(item.status, 'stage') + '</td>' +
-        '<td class="truncate-one">' + esc((item.message_text || '').slice(0, 180)) + '</td>' +
-        '<td>' + shortTime(item.created_at) + '</td>' +
-        '<td><div class="button-row"><button class="btn btn-primary btn-xs" data-action="approve" data-id="' + esc(item.id) + '">Approve</button><button class="btn btn-secondary btn-xs" data-action="skip" data-id="' + esc(item.id) + '">Skip</button></div></td>' +
-      '</tr>'
-    )).join('') || '<tr><td colspan="6">No pending approvals.</td></tr>';
-
-    return (
-      '<section class="view-section">' +
-        '<div class="table-card">' +
-          '<div class="panel-head"><div><div class="label-caps">Approvals</div><h2 class="section-title">Human Review Queue</h2></div></div>' +
-          '<table><thead><tr><th>Candidate</th><th>Channel</th><th>Status</th><th>Message</th><th>Created</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>' +
-        '</div>' +
-      '</section>'
-    );
+    const cards = (state.approvals || []).map((item) => {
+      const faded = item._faded ? ' approval-faded' : '';
+      const actions = ['approved', 'sent'].includes(item.status)
+        ? `<div class="approval-approved"><span class="stage-chip stage-qualified">✓ ${esc(item.status === 'sent' ? 'Sent' : 'Approved')}</span></div>`
+        : `<div class="button-row"><button class="btn btn-success btn-sm" data-action="approve-approval" data-id="${esc(item.id)}">✓ Approve</button><button class="btn btn-secondary btn-sm" data-action="edit-approval" data-id="${esc(item.id)}">✎ Edit</button><button class="btn btn-danger btn-sm" data-action="skip-approval" data-id="${esc(item.id)}">✗ Skip</button></div>`;
+      return (
+        `<article class="approval-card${faded}">` +
+          `<div class="approval-card-head"><div class="approval-type ${item.channel === 'linkedin_dm' ? 'approval-dm' : item.channel === 'email' ? 'approval-email' : 'approval-followup'}">${esc(item.channel === 'linkedin_dm' ? 'LINKEDIN DM' : item.channel === 'email' ? 'EMAIL' : item.channel.toUpperCase())}</div><div class="approval-meta">${esc(formatTime(item.created_at))} ${stageChip(item.status)}</div></div>` +
+          `<div class="approval-person">${esc(item.candidates?.name || 'Unknown')}</div>` +
+          `<div class="candidate-sub">${esc(item.candidates?.current_title || 'No title')} · ${esc(item.candidates?.current_company || 'No company')}</div>` +
+          `<blockquote class="approval-message">${esc(item.message_text || '')}</blockquote>` +
+          actions +
+        '</article>'
+      );
+    }).join('') || '<div class="empty-state">No approval items.</div>';
+    return '<section class="view-section"><div class="approvals-stack">' + cards + '</div></section>';
   }
 
   function renderControls() {
     const runtime = state.runtime || {};
     const health = state.health || {};
     const integrationHealth = health.integration_health || { statuses: [], checked_at: null };
-    const modules = [
+    const toggles = [
       ['outreachEnabled', 'Outreach'],
-      ['followupEnabled', 'Follow-ups'],
+      ['followupEnabled', 'Follow-up'],
       ['enrichmentEnabled', 'Enrichment'],
       ['researchEnabled', 'Research'],
       ['linkedinEnabled', 'LinkedIn'],
       ['postsEnabled', 'Posts'],
-    ].map(([key, label]) => (
-      '<div class="card toggle-card">' +
-        '<div>' +
-          '<div class="label-caps">Module</div>' +
-          '<h2 class="section-title">' + esc(label) + '</h2>' +
-          '<div class="cell-sub">' + (runtime[key] ? 'Enabled and live' : 'Disabled') + '</div>' +
-        '</div>' +
-        '<button class="toggle-switch ' + (runtime[key] ? 'is-on' : '') + '" data-action="toggle" data-key="' + esc(key) + '" aria-label="Toggle ' + esc(label) + '"><span></span></button>' +
-      '</div>'
-    )).join('');
-
-    const healthCards = (integrationHealth.statuses || []).map((item) => (
-      '<div class="card health-card">' +
-        '<div class="health-head"><span class="health-dot ' + esc(item.status) + '"></span><strong>' + esc(item.name) + '</strong></div>' +
-        '<div class="cell-sub push-top-sm">' + esc(item.detail || 'No detail') + '</div>' +
-      '</div>'
-    )).join('');
-
-    const configRows = (state.config || []).map((field) => (
-      '<form class="card config-card" data-config-form="true">' +
-        '<input type="hidden" name="key" value="' + esc(field.key) + '" />' +
-        '<div class="config-head">' +
-          '<div><div class="label-caps">' + esc(field.category) + '</div><h3 class="config-title">' + esc(field.label) + '</h3><div class="cell-sub">' + esc(field.key) + (field.restartRequired ? ' · restart required' : ' · live update') + '</div></div>' +
-          '<div class="button-row">' + (field.overridden ? '<button class="btn btn-secondary btn-xs" data-action="delete-config" data-id="' + esc(field.key) + '">Delete</button>' : '') + '</div>' +
-        '</div>' +
-        '<label class="form-span-2"><span>Value</span><textarea class="input textarea config-textarea" name="value" spellcheck="false" placeholder="Paste value here">' + esc(field.value || '') + '</textarea></label>' +
-        '<div class="button-row"><button class="btn btn-primary" type="submit">Save</button></div>' +
-      '</form>'
-    )).join('');
+    ];
 
     return (
       '<section class="view-section">' +
-        '<div class="metric-grid">' +
-          '<div class="metric-card"><div class="metric-label">System Status</div><div class="metric-value metric-value-small">' + esc(runtime.raxionStatus || 'ACTIVE') + '</div></div>' +
-          '<div class="metric-card"><div class="metric-label">Pending Approvals</div><div class="metric-value">' + (health.pending_approvals || 0) + '</div></div>' +
-          '<div class="metric-card"><div class="metric-label">Webhook Events</div><div class="metric-value">' + (health.webhook_events_logged || 0) + '</div></div>' +
-          '<div class="metric-card"><div class="metric-label">Last Updated</div><div class="metric-value metric-value-small">' + shortTime(runtime.lastUpdated || health.server_time) + '</div></div>' +
+        '<div class="metric-strip">' +
+          `<div class="metric-card strip-card"><div class="metric-number">${esc(runtime.raxionStatus || 'ACTIVE')}</div><div class="metric-caption">System Status</div></div>` +
+          `<div class="metric-card strip-card"><div class="metric-number">${health.pending_approvals || 0}</div><div class="metric-caption">Pending Approvals</div></div>` +
+          `<div class="metric-card strip-card"><div class="metric-number">${health.webhook_events_logged || 0}</div><div class="metric-caption">Webhook Events</div></div>` +
+          `<div class="metric-card strip-card"><div class="metric-number metric-small">${esc(formatTime(health.server_time))}</div><div class="metric-caption">Server Time</div></div>` +
         '</div>' +
-        '<div class="grid grid-3">' + modules + '</div>' +
-        '<div class="card">' +
-          '<div class="panel-head"><div><div class="label-caps">API Health</div><h2 class="section-title">Integration Status</h2></div><div class="button-row"><button class="btn btn-secondary" data-action="refresh-health">Refresh</button></div></div>' +
-          '<div class="cell-sub push-top">Last checked: ' + shortTime(integrationHealth.checked_at) + '</div>' +
-          '<div class="grid grid-3 push-top">' + healthCards + '</div>' +
-        '</div>' +
-        '<div class="card">' +
-          '<div class="label-caps">Environment</div><h2 class="section-title">Runtime Config</h2>' +
-          '<div class="cell-sub push-top">Edits here persist in Supabase-backed settings. Fields marked restart required do not fully apply until the process restarts.</div>' +
-          '<div class="config-grid push-top">' + configRows + '</div>' +
-        '</div>' +
+        '<div class="jobs-grid">' + toggles.map(([key, label]) => `<div class="surface toggle-surface"><div><div class="label-caps">Module</div><h3 class="section-title small">${esc(label)}</h3></div><button class="toggle-switch ${runtime[key] ? 'is-on' : ''}" data-action="toggle-runtime" data-id="${esc(key)}"><span></span></button></div>`).join('') + '</div>' +
+        '<div class="surface"><div class="section-head"><div><div class="label-caps">API Health</div><h2 class="section-title">Integration Status</h2></div><button class="btn btn-secondary btn-sm" data-action="refresh-health">Refresh</button></div><div class="health-grid">' + (integrationHealth.statuses || []).map((item) => `<div class="health-card"><div class="health-head"><span class="health-dot ${esc(item.status)}"></span><strong>${esc(item.name)}</strong></div><div class="candidate-sub">${esc(item.detail || '')}</div></div>`).join('') + '</div></div>' +
+        '<div class="surface"><div class="section-head"><div><div class="label-caps">Environment</div><h2 class="section-title">Runtime Config</h2></div></div><div class="config-grid">' + (state.config || []).map((field) => `<form class="config-card" data-config-form="true"><input type="hidden" name="key" value="${esc(field.key)}" /><div class="config-head"><div><div class="label-caps">${esc(field.category)}</div><h3 class="section-title small">${esc(field.label)}</h3><div class="candidate-sub">${esc(field.key)}${field.restartRequired ? ' · restart required' : ' · live update'}</div></div>${field.overridden ? `<button class="btn btn-secondary btn-sm" data-action="delete-config" data-id="${esc(field.key)}">Delete</button>` : ''}</div><textarea class="input textarea mono-text" name="value">${esc(field.value || '')}</textarea><div class="button-row"><button class="btn btn-primary btn-sm" type="submit">Save</button></div></form>`).join('') + '</div></div>' +
       '</section>'
     );
   }
@@ -829,51 +616,38 @@
   function renderCandidatePanel() {
     const candidate = state.candidatePanelDetail;
     if (!candidate) return '';
-    const approvals = candidate.approvals || [];
-    const conversations = candidate.conversation_history || [];
+    const stageOptions = Object.keys(STAGE_META).map((stage) => `<option value="${esc(stage)}"${candidate.pipeline_stage === stage ? ' selected' : ''}>${esc(stageInfo(stage).label)}</option>`).join('');
     return (
       '<div class="drawer-backdrop" data-action="close-candidate"></div>' +
       '<aside class="drawer">' +
-        '<div class="drawer-head">' +
-          '<div><div class="label-caps">Candidate</div><h2 class="section-title">' + esc(candidate.name || 'Unknown') + '</h2><div class="hero-sub">' + esc((candidate.current_title || 'No title') + ' at ' + (candidate.current_company || 'Unknown company')) + '</div></div>' +
-          '<button class="btn btn-secondary btn-xs" data-action="close-candidate">Close</button>' +
-        '</div>' +
+        '<div class="drawer-head"><div><div class="label-caps">Candidate</div><h2 class="section-title">' + esc(candidate.name || 'Unknown') + '</h2><div class="candidate-sub">' + esc(candidate.current_title || 'No title') + ' · ' + esc(candidate.current_company || 'No company') + '</div></div><button class="btn btn-secondary btn-sm" data-action="close-candidate">Close</button></div>' +
         '<div class="drawer-body">' +
-          '<div class="detail-card">' +
-            '<div class="detail-grid">' +
-              '<div><span class="detail-label">Location</span><strong>' + esc(candidate.location || '—') + '</strong></div>' +
-              '<div><span class="detail-label">Score</span><strong>' + (candidate.fit_score || 0) + '</strong></div>' +
-              '<div><span class="detail-label">Fit grade</span>' + badge(candidate.fit_grade || 'UNKNOWN', 'grade') + '</div>' +
-              '<div><span class="detail-label">Stage</span>' + badge(candidate.pipeline_stage || 'Unknown', 'stage') + '</div>' +
-            '</div>' +
-            '<div class="push-top button-row"><a class="btn btn-primary" target="_blank" rel="noreferrer" href="' + esc(candidate.linkedin_url || '#') + '">LinkedIn Profile</a>' + copyButton(candidate.linkedin_url) + '<button class="btn btn-secondary" data-action="sync-ats" data-id="' + esc(candidate.id) + '">Sync to ATS</button></div>' +
-          '</div>' +
-          '<div class="detail-card"><div class="detail-label">Fit rationale</div><p>' + esc(candidate.fit_rationale || 'No rationale captured.') + '</p></div>' +
-          '<div class="detail-card"><div class="detail-label">Skills</div><p>' + esc(candidate.tech_skills || 'No skills captured.') + '</p></div>' +
-          '<div class="detail-card"><div class="detail-label">Past employers</div><p>' + esc(candidate.past_employers || 'No employer history captured.') + '</p></div>' +
-          '<div class="detail-card"><div class="detail-label">Approvals</div>' + (approvals.length ? approvals.map((approval) => (
-            '<div class="approval-inline"><div>' + badge(approval.channel, 'stage') + ' ' + badge(approval.status, 'stage') + '</div><div class="thread-preview">' + esc((approval.message_text || '').slice(0, 160)) + '</div></div>'
-          )).join('') : '<p>No queued approvals.</p>') + '</div>' +
-          '<div class="detail-card"><div class="detail-label">Conversation history</div>' + (conversations.length ? conversations.map((message) => (
-            '<div class="conversation-item ' + (message.direction === 'inbound' ? 'inbound' : 'outbound') + '"><div class="conversation-meta">' + esc(message.channel || 'message') + ' · ' + shortTime(message.sent_at) + '</div><div>' + esc(message.message_text || '') + '</div></div>'
-          )).join('') : '<p>No conversation history yet.</p>') + '</div>' +
-          '<div class="button-row"><button class="btn btn-primary" data-action="approve-candidate" data-id="' + esc(candidate.id) + '">Approve Message</button><button class="btn btn-secondary" data-action="archive-candidate" data-id="' + esc(candidate.id) + '">Archive</button><button class="btn btn-secondary" data-action="skip-candidate-approval" data-id="' + esc(candidate.id) + '">Skip Approval</button></div>' +
+          '<div class="panel-block"><div class="panel-grid"><div><span class="panel-label">Location</span><strong>' + esc(candidate.location || '—') + '</strong></div><div><span class="panel-label">Score</span>' + scorePill(candidate.fit_score) + '</div><div><span class="panel-label">Stage</span>' + stageChip(candidate.pipeline_stage) + '</div><div><span class="panel-label">Profile</span>' + profileButton(candidate.linkedin_url) + '</div></div></div>' +
+          '<div class="panel-block"><div class="panel-label">Fit rationale</div><p>' + esc(candidate.fit_rationale || 'No rationale.') + '</p></div>' +
+          '<div class="panel-block"><div class="panel-label">Skills</div><div class="tag-row">' + (String(candidate.tech_skills || '').split(',').map((tag) => tag.trim()).filter(Boolean).map((tag) => `<span class="tag">${esc(tag)}</span>`).join('') || '<span class="muted-inline">No skills captured</span>') + '</div></div>' +
+          '<div class="panel-block"><div class="panel-label">Past employers</div><p>' + esc(candidate.past_employers || 'No employer history captured.') + '</p></div>' +
+          '<div class="panel-block"><div class="panel-label">Stage change</div><div class="button-row"><select id="candidate-stage-select" class="select">' + stageOptions + '</select><button class="btn btn-primary btn-sm" data-action="save-candidate-stage" data-id="' + esc(candidate.id) + '">Save Stage</button></div></div>' +
+          '<div class="panel-block"><div class="panel-label">Conversation history</div>' + (candidate.conversation_history || []).map((message) => `<div class="conversation-card ${message.direction === 'inbound' ? 'inbound' : 'outbound'}"><div class="conversation-meta">${esc(message.channel || 'message')} · ${esc(formatTime(message.sent_at))}</div><div>${esc(message.message_text || '')}</div></div>`).join('') + ((candidate.conversation_history || []).length ? '' : '<div class="muted-inline">No conversation history.</div>') + '</div>' +
+          '<div class="button-row"><button class="btn btn-secondary btn-sm" data-action="sync-ats" data-id="' + esc(candidate.id) + '">Sync to ATS</button><button class="btn btn-secondary btn-sm" data-action="archive-candidate" data-id="' + esc(candidate.id) + '">Archive</button></div>' +
         '</div>' +
       '</aside>'
     );
   }
 
   function render() {
-    captureDrafts();
-    setActiveNav();
+    document.querySelectorAll('.nav-link').forEach((link) => {
+      link.classList.toggle('active', link.dataset.view === state.view);
+    });
+
     if (state.loading) {
-      app.innerHTML = '<div class="card">Loading Mission Control...</div>';
+      app.innerHTML = '<div class="surface">Loading Mission Control...</div>';
       return;
     }
 
     const views = {
       overview: renderOverview,
       jobs: renderJobs,
+      pipeline: renderPipeline,
       archived: renderArchived,
       inbox: renderInbox,
       activity: renderActivity,
@@ -881,152 +655,67 @@
       controls: renderControls,
     };
 
-    const view = views[state.view] || views.overview;
-    app.innerHTML = view() + renderCandidatePanel();
-    restoreDrafts();
+    app.innerHTML = (views[state.view] || renderOverview)() + renderCandidatePanel();
   }
 
-  async function approveFirstCandidateApproval(candidateId) {
-    const detail = state.candidatePanelDetail?.id === candidateId ? state.candidatePanelDetail : await request('/api/candidates/' + candidateId);
-    const approval = (detail.approvals || []).find((item) => ['pending', 'edited'].includes(item.status));
-    if (!approval) {
-      showToast('No pending approval for this candidate.');
-      return;
-    }
-    await request('/api/approval-queue/' + approval.id + '/approve', { method: 'POST' });
-    showToast('Approval marked for the next sending window.');
-    await loadCoreData({ preserveDrafts: true });
-    if (state.selectedJobId) await loadSelectedJob(state.selectedJobId, { preserveDrafts: true });
-    if (state.candidatePanelId) await openCandidatePanel(state.candidatePanelId);
-  }
-
-  async function skipFirstCandidateApproval(candidateId) {
-    const detail = state.candidatePanelDetail?.id === candidateId ? state.candidatePanelDetail : await request('/api/candidates/' + candidateId);
-    const approval = (detail.approvals || []).find((item) => ['pending', 'edited', 'approved'].includes(item.status));
-    if (!approval) {
-      showToast('No approval to skip.');
-      return;
-    }
-    await request('/api/approval-queue/' + approval.id + '/skip', { method: 'POST' });
-    showToast('Approval skipped.');
-    await loadCoreData({ preserveDrafts: true });
-    if (state.selectedJobId) await loadSelectedJob(state.selectedJobId, { preserveDrafts: true });
-    if (state.candidatePanelId) await openCandidatePanel(state.candidatePanelId);
-  }
-
-  async function archiveCandidate(candidateId) {
-    await request('/api/candidates/' + candidateId + '/stage', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ stage: 'Archived' }),
+  function markApprovalLocally(approvalId, status) {
+    const collections = [state.approvals, state.selectedJobApprovals, state.candidatePanelDetail?.approvals].filter(Boolean);
+    collections.forEach((items) => {
+      const target = items.find((item) => item.id === approvalId);
+      if (target) {
+        target.status = status;
+        target._faded = false;
+        setTimeout(() => {
+          target._faded = true;
+          render();
+        }, 3000);
+      }
     });
-    showToast('Candidate archived.');
-    await loadCoreData({ preserveDrafts: true });
-    if (state.selectedJobId) await loadSelectedJob(state.selectedJobId, { preserveDrafts: true });
-    if (state.candidatePanelId === candidateId) closeCandidatePanel();
   }
 
   async function handleAction(action, id, extra, sourceEl) {
-    if (action === 'approve') {
-      await request('/api/approval-queue/' + id + '/approve', { method: 'POST' });
-      showToast('Approval marked for the next sending window.');
-      await loadCoreData({ preserveDrafts: true });
-      return;
-    }
-
-    if (action === 'skip') {
-      await request('/api/approval-queue/' + id + '/skip', { method: 'POST' });
-      showToast('Approval skipped.');
-      await loadCoreData({ preserveDrafts: true });
-      return;
-    }
-
-    if (action === 'select-job') {
+    if (action === 'open-job') {
       state.view = 'jobs';
-      state.jobsView = 'overview';
+      state.selectedJobTab = 'all_candidates';
       window.location.hash = 'jobs';
       await loadSelectedJob(id);
       return;
     }
 
-    if (action === 'toggle') {
-      await request('/api/toggle', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key: extra }),
-      });
-      await loadCoreData({ preserveDrafts: true });
-      state.view = 'controls';
+    if (action === 'set-job-tab') {
+      state.selectedJobTab = id;
       render();
       return;
     }
 
-    if (action === 'refresh-health') {
-      state.health = await request('/api/health?refresh=true');
+    if (action === 'set-activity-group') {
+      if (id === 'overview') state.selectedActivityGroup = sourceEl.value;
+      if (id === 'global') state.selectedGlobalActivityGroup = sourceEl.value;
       render();
       return;
     }
 
-    if (action === 'delete-config') {
-      await request('/api/config/' + encodeURIComponent(id), { method: 'DELETE' });
-      showToast('Config value deleted.');
-      await loadCoreData({ preserveDrafts: true });
-      state.view = 'controls';
+    if (action === 'set-job-activity-filter') {
+      state.selectedJobActivityType = sourceEl.value;
       render();
-      return;
-    }
-
-    if (action === 'delete-asset') {
-      await request('/api/jobs/' + state.selectedJobId + '/assets/' + id, { method: 'DELETE' });
-      await loadSelectedJob(state.selectedJobId, { preserveDrafts: true });
-      return;
-    }
-
-    if (action === 'set-job-view') {
-      state.jobsView = extra;
-      render();
-      return;
-    }
-
-    if (action === 'set-activity-filter') {
-      state.selectedActivityFilter = id;
-      await loadSelectedJob(state.selectedJobId, { preserveDrafts: true });
       return;
     }
 
     if (action === 'source-now') {
-      await request('/api/jobs/' + id + '/source-now', { method: 'POST' });
-      showToast('Sourcing triggered. Watch Rankings and Activity.');
-      state.jobsView = 'rankings';
-      await loadCoreData({ preserveDrafts: true });
-      await loadSelectedJob(id, { preserveDrafts: true });
+      await request(`/api/jobs/${id}/source-now`, { method: 'POST' });
+      showToast('Sourcing triggered.');
+      await loadCoreData();
+      await loadSelectedJob(id);
       return;
     }
 
     if (action === 'close-job') {
-      await request('/api/jobs/' + id + '/close', { method: 'POST' });
+      await request(`/api/jobs/${id}/close`, { method: 'POST' });
       showToast('Job closed.');
+      await loadCoreData();
       state.view = 'archived';
       window.location.hash = 'archived';
-      await loadCoreData({ preserveDrafts: true });
-      return;
-    }
-
-    if (action === 'delete-job') {
-      const confirmed = window.confirm('Delete this job and all related candidates from Raxion?');
-      if (!confirmed) return;
-      await request('/api/jobs/' + id, {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ confirm: true }),
-      });
-      showToast('Job and related candidates deleted.');
-      if (state.selectedJobId === id) {
-        state.selectedJobId = null;
-        state.selectedJobDetail = null;
-        state.selectedJobCandidates = [];
-      }
-      await loadCoreData({ preserveDrafts: true });
+      render();
       return;
     }
 
@@ -1040,39 +729,118 @@
       return;
     }
 
-    if (action === 'copy-url') {
-      await navigator.clipboard.writeText(sourceEl?.dataset.url || '');
-      showToast('Link copied.');
-      return;
-    }
-
     if (action === 'archive-candidate') {
-      await archiveCandidate(id);
+      await request(`/api/candidates/${id}/stage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stage: 'Archived' }),
+      });
+      showToast('Candidate archived.');
+      await loadCoreData();
+      if (state.selectedJobId) await loadSelectedJob(state.selectedJobId);
+      if (state.candidatePanelId === id) closeCandidatePanel();
       return;
     }
 
-    if (action === 'approve-candidate') {
-      await approveFirstCandidateApproval(id);
+    if (action === 'reinstate-candidate') {
+      const candidate = Object.values(state.jobCandidates).flat().find((item) => item.id === id);
+      const nextStage = Number(candidate?.fit_score || 0) >= 60 ? 'Shortlisted' : 'Sourced';
+      await request(`/api/candidates/${id}/stage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stage: nextStage }),
+      });
+      showToast('Candidate reinstated.');
+      await loadCoreData();
+      if (state.selectedJobId) await loadSelectedJob(state.selectedJobId);
       return;
     }
 
-    if (action === 'skip-candidate-approval') {
-      await skipFirstCandidateApproval(id);
+    if (action === 'save-candidate-stage') {
+      const stage = document.getElementById('candidate-stage-select')?.value;
+      await request(`/api/candidates/${id}/stage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stage }),
+      });
+      showToast('Candidate stage updated.');
+      await openCandidatePanel(id);
+      await loadCoreData();
+      if (state.selectedJobId) await loadSelectedJob(state.selectedJobId);
       return;
     }
 
     if (action === 'sync-ats') {
-      await request('/api/candidates/' + id + '/sync-ats', { method: 'POST' });
+      await request(`/api/candidates/${id}/sync-ats`, { method: 'POST' });
       showToast('ATS sync triggered.');
+      return;
+    }
+
+    if (action === 'approve-approval') {
+      await request(`/api/approval-queue/${id}/approve`, { method: 'POST' });
+      markApprovalLocally(id, 'approved');
+      render();
+      return;
+    }
+
+    if (action === 'skip-approval') {
+      await request(`/api/approval-queue/${id}/skip`, { method: 'POST' });
+      const target = state.approvals.find((item) => item.id === id);
+      if (target) target.status = 'rejected';
+      render();
+      return;
+    }
+
+    if (action === 'edit-approval') {
+      const approval = state.approvals.find((item) => item.id === id);
+      const next = window.prompt('Edit message', approval?.message_text || '');
+      if (next == null) return;
+      const updated = await request(`/api/approval-queue/${id}/edit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message_text: next }),
+      });
+      const target = state.approvals.find((item) => item.id === id);
+      if (target) {
+        target.message_text = updated.message_text;
+        target.status = updated.status;
+      }
+      render();
+      return;
+    }
+
+    if (action === 'toggle-runtime') {
+      await request('/api/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: id }),
+      });
+      await loadCoreData();
+      state.view = 'controls';
+      render();
+      return;
+    }
+
+    if (action === 'refresh-health') {
+      state.health = await request('/api/health?refresh=true');
+      render();
+      return;
+    }
+
+    if (action === 'delete-config') {
+      await request(`/api/config/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      await loadCoreData();
+      state.view = 'controls';
+      render();
       return;
     }
   }
 
   document.addEventListener('click', async (event) => {
-    const link = event.target.closest('.nav-link');
-    if (link) {
+    const nav = event.target.closest('.nav-link');
+    if (nav) {
       event.preventDefault();
-      state.view = link.dataset.view;
+      state.view = nav.dataset.view;
       window.location.hash = state.view;
       render();
       return;
@@ -1084,8 +852,8 @@
       try {
         await handleAction(
           actionEl.dataset.action,
-          actionEl.dataset.id || actionEl.dataset.jobId || actionEl.dataset.assetId,
-          actionEl.dataset.key || actionEl.dataset.jobView || actionEl.dataset.stage,
+          actionEl.dataset.id,
+          actionEl.dataset.extra,
           actionEl,
         );
       } catch (error) {
@@ -1095,7 +863,7 @@
     }
 
     if (event.target.id === 'refresh-dashboard') {
-      await loadCoreData({ preserveDrafts: true });
+      await loadCoreData();
       return;
     }
 
@@ -1103,8 +871,21 @@
       state.view = 'jobs';
       window.location.hash = 'jobs';
       render();
-      const form = document.getElementById('job-create-form');
-      if (form) form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
+
+    if (event.target.id === 'toggle-sidebar') {
+      document.body.classList.toggle('sidebar-open');
+    }
+  });
+
+  document.addEventListener('change', async (event) => {
+    const actionEl = event.target.closest('[data-action]');
+    if (!actionEl) return;
+    try {
+      await handleAction(actionEl.dataset.action, actionEl.dataset.id, actionEl.dataset.extra, event.target);
+    } catch (error) {
+      showToast(error.message, 'error');
     }
   });
 
@@ -1121,60 +902,24 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
-      event.target.reset();
-      state.view = 'jobs';
-      state.jobsView = 'overview';
       await loadCoreData();
       await loadSelectedJob(result.job_id);
-      return;
-    }
-
-    if (event.target.id === 'job-asset-form') {
-      event.preventDefault();
-      const jobId = event.target.dataset.jobId;
-      const payload = Object.fromEntries(new FormData(event.target).entries());
-      try {
-        await request('/api/jobs/' + jobId + '/assets', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-        event.target.reset();
-        await loadSelectedJob(jobId, { preserveDrafts: true });
-      } catch (error) {
-        showToast(error.message.indexOf('job_assets') >= 0 ? 'Run migration 003_raxion_dashboard_assets.sql before using assets.' : error.message, 'error');
-      }
-      return;
-    }
-
-    if (event.target.id === 'job-settings-form') {
-      event.preventDefault();
-      const jobId = event.target.dataset.jobId;
-      const payload = Object.fromEntries(new FormData(event.target).entries());
-      if (payload.linkedin_daily_limit) payload.linkedin_daily_limit = Number(payload.linkedin_daily_limit);
-      await request('/api/jobs/' + jobId, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      showToast('Job settings saved.');
-      await loadCoreData({ preserveDrafts: true });
-      await loadSelectedJob(jobId, { preserveDrafts: true });
+      state.view = 'jobs';
+      render();
       return;
     }
 
     if (event.target.id === 'job-templates-form') {
       event.preventDefault();
       const jobId = event.target.dataset.jobId;
-      const form = Object.fromEntries(new FormData(event.target).entries());
-      await request('/api/jobs/' + jobId, {
+      const templates = Object.fromEntries(new FormData(event.target).entries());
+      await request(`/api/jobs/${jobId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ outreach_templates: form }),
+        body: JSON.stringify({ outreach_templates: templates }),
       });
       showToast('Templates saved.');
-      await loadCoreData({ preserveDrafts: true });
-      await loadSelectedJob(jobId, { preserveDrafts: true });
+      await loadSelectedJob(jobId);
       return;
     }
 
@@ -1186,9 +931,10 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
-      showToast('Config value saved.');
-      await loadCoreData({ preserveDrafts: true });
+      showToast('Config saved.');
+      await loadCoreData();
       state.view = 'controls';
+      render();
     }
   });
 
@@ -1202,17 +948,16 @@
     try {
       const payload = JSON.parse(event.data);
       state.activity = [payload, ...(state.activity || [])].slice(0, 100);
-      const jobId = state.selectedJobDetail?.id;
-      if (jobId && payload.job_id === jobId) {
+      if (payload.job_id === state.selectedJobId) {
         state.selectedJobActivity = [payload, ...(state.selectedJobActivity || [])].slice(0, 200);
       }
-      if (document.visibilityState === 'visible' && state.view === 'overview') render();
+      render();
     } catch {
       return;
     }
   };
 
   loadCoreData().catch((error) => {
-    app.innerHTML = '<div class="card">Failed to load dashboard: ' + esc(error.message) + '</div>';
+    app.innerHTML = '<div class="surface">Failed to load dashboard: ' + esc(error.message) + '</div>';
   });
 }());

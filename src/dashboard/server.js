@@ -32,6 +32,7 @@ function htmlPage() {
       <nav class="nav">
         <a class="nav-link active" href="#overview" data-view="overview"><span class="nav-icon">◈</span><span>Overview</span><span class="nav-dot"></span></a>
         <a class="nav-link" href="#jobs" data-view="jobs"><span class="nav-icon">◻</span><span>Jobs</span><span class="nav-dot"></span></a>
+        <a class="nav-link" href="#pipeline" data-view="pipeline"><span class="nav-icon">▦</span><span>Pipeline</span><span class="nav-dot"></span></a>
         <a class="nav-link" href="#archived" data-view="archived"><span class="nav-icon">▤</span><span>Archived</span><span class="nav-dot"></span></a>
         <a class="nav-link" href="#inbox" data-view="inbox"><span class="nav-icon">◎</span><span>Inbox</span><span class="nav-dot"></span></a>
         <a class="nav-link" href="#activity" data-view="activity"><span class="nav-icon">◉</span><span>Activity</span><span class="nav-dot"></span></a>
@@ -43,6 +44,7 @@ function htmlPage() {
     <main class="main">
       <div class="container">
         <header class="page-header">
+          <button class="mobile-menu" id="toggle-sidebar" type="button">Menu</button>
           <div>
             <h1 class="page-title">Raxion</h1>
             <div class="page-subtitle label-caps">Autonomous Recruiting Ops</div>
