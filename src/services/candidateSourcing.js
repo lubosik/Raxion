@@ -123,6 +123,29 @@ async function getJob(jobOrId) {
   return data;
 }
 
+async function getActiveDuplicateProviderIds(jobId, providerIds = []) {
+  const filteredProviderIds = providerIds.filter(Boolean);
+  if (!filteredProviderIds.length) return new Set();
+
+  const { data: activeJobs } = await supabase
+    .from('jobs')
+    .select('id')
+    .eq('status', 'ACTIVE')
+    .eq('paused', false)
+    .neq('id', jobId);
+
+  const activeJobIds = (activeJobs || []).map((job) => job.id).filter(Boolean);
+  if (!activeJobIds.length) return new Set();
+
+  const { data: duplicates } = await supabase
+    .from('candidates')
+    .select('linkedin_provider_id, job_id, name')
+    .in('job_id', activeJobIds)
+    .in('linkedin_provider_id', filteredProviderIds);
+
+  return new Set((duplicates || []).map((candidate) => candidate.linkedin_provider_id).filter(Boolean));
+}
+
 export async function sourceCandidatesForJob(jobOrId) {
   const job = await getJob(jobOrId);
   if (!job) return { total: 0, hot: 0, warm: 0 };
@@ -150,6 +173,17 @@ export async function sourceCandidatesForJob(jobOrId) {
         dedupe.set(providerId, result);
       }
     }
+  }
+
+  const blockedProviderIds = await getActiveDuplicateProviderIds(job.id, Array.from(dedupe.keys()));
+  for (const providerId of blockedProviderIds) {
+    dedupe.delete(providerId);
+  }
+
+  if (blockedProviderIds.size) {
+    await logActivity(job.id, null, 'ACTIVE_PIPELINE_DEDUPE', `Skipped ${blockedProviderIds.size} candidates already attached to another active job`, {
+      duplicate_provider_ids: Array.from(blockedProviderIds),
+    });
   }
 
   const savedCandidates = [];
@@ -310,9 +344,18 @@ export async function sourceFromLinkedInJobPosting(jobOrId) {
   if (!job?.linkedin_job_posting_id) return [];
 
   const applicants = await getJobApplicants(job.linkedin_job_posting_id, {});
+  const blockedProviderIds = await getActiveDuplicateProviderIds(job.id, (applicants || []).map((applicant) => applicant.provider_id || applicant.id));
   const saved = [];
 
   for (const applicant of applicants || []) {
+    if (blockedProviderIds.has(applicant.provider_id || applicant.id)) {
+      // eslint-disable-next-line no-await-in-loop
+      await logActivity(job.id, null, 'ACTIVE_PIPELINE_DEDUPE', `Skipped applicant ${applicant.name || applicant.full_name || 'Unknown'} already attached to another active job`, {
+        provider_id: applicant.provider_id || applicant.id || null,
+      });
+      continue;
+    }
+
     // eslint-disable-next-line no-await-in-loop
     const scoring = await scoreCandidateAgainstJob(applicant, job);
     let cvText = null;

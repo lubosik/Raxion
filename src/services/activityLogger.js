@@ -48,19 +48,32 @@ export async function logActivityOncePerWindow(jobId, candidateId, eventType, su
 }
 
 export async function fetchJobMetrics(jobId) {
-  const [{ count: sourced }, { count: outreach }, { count: replies }, { count: qualified }, { count: interviews }, { count: approvals }] = await Promise.all([
+  const [{ count: sourced }, { count: outreach }, { count: replies }, { count: qualified }, { count: interviews }, { count: approvals }, { count: invites }, { count: accepted }, { count: emailsSent }, { count: emailReplies }] = await Promise.all([
     supabase.from('candidates').select('*', { count: 'exact', head: true }).eq('job_id', jobId),
     supabase.from('candidates').select('*', { count: 'exact', head: true }).eq('job_id', jobId).in('pipeline_stage', ['invite_sent', 'invite_accepted', 'dm_sent', 'email_sent', 'Replied', 'Qualified', 'Interview Booked', 'Interview Scheduled', 'Offered', 'Placed']),
     supabase.from('candidates').select('*', { count: 'exact', head: true }).eq('job_id', jobId).not('last_reply_at', 'is', null),
     supabase.from('candidates').select('*', { count: 'exact', head: true }).eq('job_id', jobId).eq('pipeline_stage', 'Qualified'),
     supabase.from('candidates').select('*', { count: 'exact', head: true }).eq('job_id', jobId).not('interview_booked_at', 'is', null),
     supabase.from('approval_queue').select('*', { count: 'exact', head: true }).eq('job_id', jobId).in('status', ['pending', 'edited']),
+    supabase.from('candidates').select('*', { count: 'exact', head: true }).eq('job_id', jobId).not('invite_sent_at', 'is', null),
+    supabase.from('candidates').select('*', { count: 'exact', head: true }).eq('job_id', jobId).not('invite_accepted_at', 'is', null),
+    supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('job_id', jobId).eq('direction', 'outbound').eq('channel', 'email'),
+    supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('job_id', jobId).eq('direction', 'inbound').eq('channel', 'email'),
   ]);
+
+  const linkedinAcceptanceRate = invites ? ((accepted || 0) / invites) * 100 : 0;
+  const emailReplyRate = emailsSent ? ((emailReplies || 0) / emailsSent) * 100 : 0;
 
   return {
     candidates_sourced: sourced || 0,
     outreach_sent: outreach || 0,
     candidates_in_outreach: outreach || 0,
+    invites_sent: invites || 0,
+    invites_accepted: accepted || 0,
+    linkedin_acceptance_rate: linkedinAcceptanceRate,
+    emails_sent: emailsSent || 0,
+    email_replies: emailReplies || 0,
+    email_reply_rate: emailReplyRate,
     replies: replies || 0,
     qualified: qualified || 0,
     interviews_booked: interviews || 0,

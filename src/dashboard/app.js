@@ -19,6 +19,7 @@
     selectedActivityGroup: 'all',
     selectedGlobalActivityGroup: 'all',
     selectedJobActivityType: 'all',
+    showCreateJobForm: false,
     candidatePanelId: null,
     candidatePanelDetail: null,
     loading: false,
@@ -46,6 +47,7 @@
   };
 
   const JOB_TABS = [
+    ['overview', 'Overview'],
     ['all_candidates', 'All Candidates'],
     ['shortlisted', 'Shortlisted'],
     ['ranked', 'Ranked'],
@@ -174,6 +176,17 @@
     return url
       ? `<a class="btn btn-secondary btn-sm" href="${esc(url)}" target="_blank" rel="noreferrer">View Profile</a>`
       : '<span class="muted-inline">No profile</span>';
+  }
+
+  function percent(numerator, denominator) {
+    if (!denominator) return '0%';
+    return `${Math.round((Number(numerator || 0) / Number(denominator || 0)) * 100)}%`;
+  }
+
+  function scrollToId(id) {
+    window.requestAnimationFrame(() => {
+      document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
   }
 
   function getActiveJobs() {
@@ -374,7 +387,10 @@
       '<section class="view-section">' +
         '<div class="metric-strip">' +
           `<div class="metric-card strip-card"><div class="metric-number">${stats.candidates_sourced || 0}</div><div class="metric-caption">Total Sourced</div></div>` +
-          `<div class="metric-card strip-card"><div class="metric-number">${stats.outreach_sent || 0}</div><div class="metric-caption">Outreach Sent</div></div>` +
+          `<div class="metric-card strip-card"><div class="metric-number">${stats.invites_sent || 0}</div><div class="metric-caption">LinkedIn Requests</div></div>` +
+          `<div class="metric-card strip-card"><div class="metric-number">${percent(stats.invites_accepted, stats.invites_sent)}</div><div class="metric-caption">LinkedIn Acceptance Rate</div></div>` +
+          `<div class="metric-card strip-card"><div class="metric-number">${stats.emails_sent || 0}</div><div class="metric-caption">Emails Sent</div></div>` +
+          `<div class="metric-card strip-card"><div class="metric-number">${percent(stats.email_replies, stats.emails_sent)}</div><div class="metric-caption">Email Reply Rate</div></div>` +
           `<div class="metric-card strip-card"><div class="metric-number">${stats.replies || 0}</div><div class="metric-caption">Replies</div></div>` +
           `<div class="metric-card strip-card"><div class="metric-number">${stats.active_jobs || 0}</div><div class="metric-caption">Active Jobs</div></div>` +
         '</div>' +
@@ -393,8 +409,9 @@
   function renderJobCard(job) {
     const counts = getJobCounts(job.id);
     const borderClass = job.status === 'ACTIVE' ? 'job-border-active' : job.status === 'PAUSED' ? 'job-border-paused' : 'job-border-closed';
+    const selectedClass = state.selectedJobId === job.id ? ' is-selected' : '';
     return (
-      '<article class="job-card ' + borderClass + '">' +
+      '<article class="job-card ' + borderClass + selectedClass + '">' +
         `<div class="job-card-head"><div><h3 class="job-card-title">${esc(job.job_title || job.name)}</h3><div class="job-card-sub">${esc(job.client_name || 'Unknown client')} · ${esc(job.location || 'No location')}</div></div>${statusChip(job.status)}</div>` +
         '<div class="job-bars">' +
           `<div class="job-bar-row"><span>${renderProgressBar({ sourced: counts.sourced, shortlisted: 0, outreach: 0, replies: 0 })}</span><strong>${counts.sourced} sourced</strong></div>` +
@@ -403,6 +420,27 @@
         '</div>' +
         `<div class="button-row"><button class="btn btn-primary btn-sm" data-action="open-job" data-id="${esc(job.id)}">View</button><button class="btn btn-secondary btn-sm" data-action="source-now" data-id="${esc(job.id)}">Source Now</button><button class="btn btn-danger btn-sm" data-action="close-job" data-id="${esc(job.id)}">Close</button></div>` +
       '</article>'
+    );
+  }
+
+  function renderCreateJobForm() {
+    if (!state.showCreateJobForm) return '';
+    return (
+      '<form id="job-create-form" class="surface form-grid create-job-form">' +
+        '<div class="form-span-2"><div class="label-caps">Launch Job</div><h2 class="section-title">Create New Pipeline</h2><div class="job-detail-sub">Add the brief here, then Raxion can source and sequence from this pipeline immediately.</div></div>' +
+        '<label><span>Job Title</span><input class="input" name="job_title" required placeholder="Senior Recruitment Consultant" /></label>' +
+        '<label><span>Client</span><input class="input" name="client_name" required placeholder="LIBDR" /></label>' +
+        '<label><span>Location</span><input class="input" name="location" placeholder="United States" /></label>' +
+        '<label><span>Sector</span><input class="input" name="sector" placeholder="Recruitment" /></label>' +
+        '<label><span>Seniority</span><input class="input" name="seniority_level" placeholder="Senior" /></label>' +
+        '<label><span>Must-have Skills</span><input class="input" name="tech_stack_must" placeholder="Recruitment, BD, LinkedIn outreach" /></label>' +
+        '<label><span>Timezone</span><input class="input" name="timezone" placeholder="Europe/London" /></label>' +
+        '<label><span>Send Window Start</span><input class="input" name="send_window_start" placeholder="09:00" /></label>' +
+        '<label><span>Send Window End</span><input class="input" name="send_window_end" placeholder="17:00" /></label>' +
+        '<label><span>LinkedIn Daily Limit</span><input class="input" name="linkedin_daily_limit" type="number" min="1" placeholder="28" /></label>' +
+        '<label class="form-span-2"><span>Role Notes</span><textarea class="input textarea" name="notes" placeholder="What makes a good candidate, market notes, messaging context, client nuances."></textarea></label>' +
+        '<div class="form-span-2 button-row"><button class="btn btn-primary" type="submit">Create Job</button><button class="btn btn-secondary" type="button" data-action="toggle-create-job" data-id="off">Cancel</button></div>' +
+      '</form>'
     );
   }
 
@@ -455,9 +493,30 @@
     const replies = all.filter((candidate) => ['Replied', 'Qualified'].includes(candidate.pipeline_stage));
     const archived = all.filter((candidate) => ['Archived', 'Rejected', 'Withdrawn'].includes(candidate.pipeline_stage));
     const templates = parseTemplates(job.outreach_templates);
+    const metrics = job.metrics || {};
+    const counts = candidateStageCounts(all);
 
     let content = '';
-    if (state.selectedJobTab === 'shortlisted') {
+    if (state.selectedJobTab === 'overview') {
+      content = (
+        '<section class="view-section">' +
+          '<div class="metric-strip metric-strip-job">' +
+            `<div class="metric-card strip-card"><div class="metric-number">${metrics.candidates_sourced || all.length || 0}</div><div class="metric-caption">Candidates</div></div>` +
+            `<div class="metric-card strip-card"><div class="metric-number">${metrics.invites_sent || 0}</div><div class="metric-caption">LinkedIn Requests</div></div>` +
+            `<div class="metric-card strip-card"><div class="metric-number">${percent(metrics.invites_accepted, metrics.invites_sent)}</div><div class="metric-caption">Acceptance Rate</div></div>` +
+            `<div class="metric-card strip-card"><div class="metric-number">${metrics.emails_sent || 0}</div><div class="metric-caption">Emails Sent</div></div>` +
+            `<div class="metric-card strip-card"><div class="metric-number">${percent(metrics.email_replies, metrics.emails_sent)}</div><div class="metric-caption">Email Reply Rate</div></div>` +
+            `<div class="metric-card strip-card"><div class="metric-number">${metrics.approval_queue_count || 0}</div><div class="metric-caption">Pending Approvals</div></div>` +
+          '</div>' +
+          '<div class="surface">' +
+            '<div class="section-head"><div><div class="label-caps">Pipeline Snapshot</div><h2 class="section-title">Stage Breakdown</h2></div></div>' +
+            '<div class="job-snapshot-grid">' +
+              Object.entries(counts).map(([stage, count]) => `<div class="snapshot-card"><div>${stageChip(stage)}</div><strong>${esc(count)}</strong></div>`).join('') +
+            '</div>' +
+          '</div>' +
+        '</section>'
+      );
+    } else if (state.selectedJobTab === 'shortlisted') {
       content = renderCandidateTable(shortlisted);
     } else if (state.selectedJobTab === 'ranked') {
       content = renderCandidateTable(ranked);
@@ -493,7 +552,7 @@
     }
 
     return (
-      '<section class="view-section">' +
+      '<section class="view-section" id="job-detail-anchor">' +
         '<div class="job-detail-header surface">' +
           '<div><div class="label-caps">Job Detail</div><h2 class="section-title">' + esc(job.job_title || job.name) + '</h2><div class="job-detail-sub">' + esc(job.client_name || 'Unknown client') + ' · ' + esc(job.location || 'No location') + '</div></div>' +
           '<div class="button-row"><button class="btn btn-primary btn-sm" data-action="source-now" data-id="' + esc(job.id) + '">Source Now</button><button class="btn btn-secondary btn-sm" data-action="close-job" data-id="' + esc(job.id) + '">Close</button></div>' +
@@ -507,6 +566,7 @@
   function renderJobs() {
     return (
       '<section class="view-section">' +
+        renderCreateJobForm() +
         '<div class="jobs-grid">' + getActiveJobs().map(renderJobCard).join('') + '</div>' +
         renderJobDetail() +
       '</section>'
@@ -677,8 +737,19 @@
     if (action === 'open-job') {
       state.view = 'jobs';
       state.selectedJobTab = 'all_candidates';
+      state.showCreateJobForm = false;
       window.location.hash = 'jobs';
       await loadSelectedJob(id);
+      scrollToId('job-detail-anchor');
+      return;
+    }
+
+    if (action === 'toggle-create-job') {
+      state.showCreateJobForm = id !== 'off';
+      state.view = 'jobs';
+      window.location.hash = 'jobs';
+      render();
+      if (state.showCreateJobForm) scrollToId('job-create-form');
       return;
     }
 
@@ -869,8 +940,10 @@
 
     if (event.target.id === 'launch-job') {
       state.view = 'jobs';
+      state.showCreateJobForm = true;
       window.location.hash = 'jobs';
       render();
+      scrollToId('job-create-form');
       return;
     }
 
@@ -905,7 +978,9 @@
       await loadCoreData();
       await loadSelectedJob(result.job_id);
       state.view = 'jobs';
+      state.showCreateJobForm = false;
       render();
+      scrollToId('job-detail-anchor');
       return;
     }
 

@@ -76,7 +76,7 @@ export function createDashboardServer() {
   });
 
   app.get('/api/stats', async (req, res) => {
-    const [jobs, sourced, outreach, invites, accepted, replies, qualified, interviews, placements, approvals] = await Promise.all([
+    const [jobs, sourced, outreach, invites, accepted, replies, qualified, interviews, placements, approvals, emailsSent, emailReplies] = await Promise.all([
       supabase.from('jobs').select('*', { count: 'exact', head: true }).eq('status', 'ACTIVE'),
       supabase.from('candidates').select('*', { count: 'exact', head: true }),
       supabase.from('candidates').select('*', { count: 'exact', head: true }).in('pipeline_stage', ['invite_sent', 'invite_accepted', 'dm_sent', 'email_sent', 'Replied', 'Qualified', 'Interview Booked', 'Interview Scheduled', 'Offered', 'Placed']),
@@ -87,16 +87,23 @@ export function createDashboardServer() {
       supabase.from('candidates').select('*', { count: 'exact', head: true }).not('interview_booked_at', 'is', null),
       supabase.from('candidates').select('*', { count: 'exact', head: true }).eq('pipeline_stage', 'Placed'),
       supabase.from('approval_queue').select('*', { count: 'exact', head: true }).in('status', ['pending', 'edited']),
+      supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('direction', 'outbound').eq('channel', 'email'),
+      supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('direction', 'inbound').eq('channel', 'email'),
     ]);
 
     const acceptanceRate = (invites.count || 0) ? ((accepted.count || 0) / invites.count) * 100 : 0;
+    const emailReplyRate = (emailsSent.count || 0) ? ((emailReplies.count || 0) / emailsSent.count) * 100 : 0;
     res.json({
       active_jobs: jobs.count || 0,
       candidates_sourced: sourced.count || 0,
       outreach_sent: outreach.count || 0,
       candidates_in_outreach: outreach.count || 0,
       invites_sent: invites.count || 0,
+      invites_accepted: accepted.count || 0,
       acceptance_rate: acceptanceRate,
+      emails_sent: emailsSent.count || 0,
+      email_replies: emailReplies.count || 0,
+      email_reply_rate: emailReplyRate,
       replies: replies.count || 0,
       qualified: qualified.count || 0,
       interviews_booked: interviews.count || 0,
