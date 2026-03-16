@@ -139,6 +139,11 @@ export async function processIncomingMessage(webhookPayload) {
       pipeline_stage: 'Qualified',
       qualified_at: new Date().toISOString(),
     }).eq('id', candidate.id);
+    await logActivity(candidate.job_id, candidate.id, 'CANDIDATE_QUALIFIED', `${candidate.name} qualified from reply`, {
+      intent: classification.intent,
+      reason: classification.reason,
+      next_action: classification.next_action,
+    });
     await sendTelegramMessage(getRecruiterChatId(), `⭐ ${candidate.name} is QUALIFIED for ${job.job_title} - booking message queued for your approval`).catch(() => null);
   }
 
@@ -160,9 +165,13 @@ export async function processIncomingMessage(webhookPayload) {
     });
   } else if (classification.next_action === 'archive') {
     await supabase.from('candidates').update({
-      pipeline_stage: 'Rejected',
+      pipeline_stage: 'Archived',
       notes: `${candidate.notes || ''}\n${classification.concerns || 'Archived after reply classification'}`.trim(),
     }).eq('id', candidate.id);
+    await logActivity(candidate.job_id, candidate.id, 'CANDIDATE_ARCHIVED', `${candidate.name} archived after reply`, {
+      intent: classification.intent,
+      concerns: classification.concerns,
+    });
   } else if (classification.next_action === 'escalate') {
     await sendTelegramMessage(getRecruiterChatId(), `💬 ${candidate.name} replied and needs manual recruiter handling for ${job.job_title}`).catch(() => null);
   }

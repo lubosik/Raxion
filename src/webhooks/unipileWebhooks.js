@@ -78,18 +78,37 @@ export function createUnipileWebhookRouter() {
     }
 
     if (payload.event !== 'new_relation') return;
-    const providerId = payload.user_provider_id || payload.user?.provider_id || payload.user?.attendee_provider_id || null;
-    const { data: candidate, error } = await supabase.from('candidates').select('*').eq('linkedin_provider_id', providerId).single();
-    if (error) return;
-    if (!candidate) return;
+    const providerId = payload.account_member_id || payload.attendee_provider_id || payload.provider_id || payload.user_provider_id || payload.user?.provider_id || payload.user?.attendee_provider_id || null;
+    if (!providerId) {
+      console.log('[WEBHOOK] new_relation: no provider ID - ignoring');
+      return;
+    }
+
+    const { data: candidate } = await supabase
+      .from('candidates')
+      .select('*, jobs!inner(id, job_title, status)')
+      .eq('linkedin_provider_id', providerId)
+      .in('pipeline_stage', ['invite_sent', 'Shortlisted', 'Enriched'])
+      .eq('jobs.status', 'ACTIVE')
+      .limit(1)
+      .maybeSingle();
+
+    if (!candidate) {
+      console.log(`[WEBHOOK] LinkedIn ID ${providerId} not found in any active pipeline - ignoring`);
+      return;
+    }
+
+    if (!candidate.name || candidate.name.toLowerCase() === 'null') {
+      console.log(`[WEBHOOK] Candidate ${candidate.id} has no valid name - ignoring`);
+      return;
+    }
 
     await supabase.from('candidates').update({
       pipeline_stage: 'invite_accepted',
       invite_accepted_at: new Date().toISOString(),
     }).eq('id', candidate.id);
-    const { data: job } = await supabase.from('jobs').select('job_title').eq('id', candidate.job_id).single();
-    await logActivity(candidate.job_id, candidate.id, 'INVITE_ACCEPTED', `${candidate.name} accepted your connection request`, payload);
-    await sendTelegramMessage(getRecruiterChatId(), `🤝 ${candidate.name} accepted your connection request for ${job?.job_title || 'job ' + candidate.job_id}`).catch(() => null);
+    await logActivity(candidate.job_id, candidate.id, 'INVITE_ACCEPTED', `${candidate.name} accepted connection request`, payload);
+    await sendTelegramMessage(getRecruiterChatId(), `🤝 Connection accepted: ${candidate.name} at ${candidate.current_company || 'unknown firm'} - queued for DM draft`).catch(() => null);
   });
 
   return router;

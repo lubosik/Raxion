@@ -58,7 +58,7 @@ export function startTelegramBot() {
     try {
       if (message.text.startsWith('/brief')) return handleBriefCommand(chatId, message.text);
       if (message.text === '/status') return handleStatusCommand(chatId);
-      if (message.text.startsWith('/approve_')) return approveQueuedMessage(message.text.replace('/approve_', '').trim()).then(() => bot.sendMessage(chatId, 'Approved and sent.'));
+      if (message.text.startsWith('/approve_')) return approveQueuedMessage(message.text.replace('/approve_', '').trim()).then(() => bot.sendMessage(chatId, 'Approved and queued for the next sending window.'));
       if (message.text.startsWith('/edit_')) {
         const [approvalId, ...rest] = message.text.replace('/edit_', '').trim().split(' ');
         await editQueuedMessage(approvalId, rest.join(' '));

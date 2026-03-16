@@ -5,11 +5,24 @@ import { sendTelegramMessage, getRecruiterChatId } from '../integrations/telegra
 import { sleep } from '../lib_utils.js';
 import { logActivity } from './activityLogger.js';
 
+function normalizeScoreResult(scoreResult) {
+  const fitScore = Math.max(0, Math.min(100, Math.round(Number(scoreResult?.fit_score ?? scoreResult?.score ?? 0))));
+  const fitGrade = fitScore >= 80 ? 'HOT' : fitScore >= 60 ? 'WARM' : fitScore >= 40 ? 'POSSIBLE' : 'ARCHIVE';
+
+  return {
+    fit_score: fitScore,
+    fit_grade: scoreResult?.fit_grade || scoreResult?.grade || fitGrade,
+    fit_rationale: scoreResult?.fit_rationale || scoreResult?.rationale || scoreResult?.reason || 'No rationale returned',
+  };
+}
+
 function normaliseCandidate(profile, job, scoring, source = 'LinkedIn Search') {
   const linkedinUrl = profile.profile_url || profile.linkedin_url || (profile.public_identifier ? `https://www.linkedin.com/in/${profile.public_identifier}` : null);
   const yearsExperience = Array.isArray(profile.work_experience)
     ? profile.work_experience.length
     : Number(profile.years_experience || 0) || null;
+  const normalizedScore = normalizeScoreResult(scoring);
+  const pipelineStage = normalizedScore.fit_score >= 60 ? 'Shortlisted' : normalizedScore.fit_score >= 30 ? 'Sourced' : 'Archived';
 
   return {
     job_id: job.id,
@@ -25,10 +38,10 @@ function normaliseCandidate(profile, job, scoring, source = 'LinkedIn Search') {
     tech_skills: Array.isArray(profile.skills) ? profile.skills.join(', ') : profile.skills || null,
     past_employers: Array.isArray(profile.work_experience) ? profile.work_experience.map((item) => item.company).filter(Boolean).join(', ') : null,
     education: Array.isArray(profile.education) ? profile.education.map((item) => item.school || item.name).filter(Boolean).join(', ') : null,
-    fit_score: scoring.fit_score,
-    fit_grade: scoring.fit_grade,
-    fit_rationale: scoring.fit_rationale,
-    pipeline_stage: scoring.fit_score >= 60 ? 'Shortlisted' : scoring.fit_score >= 30 ? 'Sourced' : 'Archived',
+    fit_score: normalizedScore.fit_score,
+    fit_grade: normalizedScore.fit_grade,
+    fit_rationale: normalizedScore.fit_rationale,
+    pipeline_stage: pipelineStage,
     enrichment_status: 'Pending',
     source,
     notes: profile.headline || null,
@@ -101,13 +114,7 @@ export async function scoreCandidateAgainstJob(candidateProfile, job) {
     };
   }
 
-  const fitScore = Math.max(0, Math.min(100, Math.round(Number(result?.fit_score || 0))));
-  const fitGrade = fitScore >= 80 ? 'HOT' : fitScore >= 60 ? 'WARM' : fitScore >= 40 ? 'POSSIBLE' : 'ARCHIVE';
-  return {
-    fit_score: fitScore,
-    fit_grade: result?.fit_grade || fitGrade,
-    fit_rationale: result?.fit_rationale || 'No rationale returned',
-  };
+  return normalizeScoreResult(result);
 }
 
 async function getJob(jobOrId) {
@@ -170,8 +177,8 @@ export async function sourceCandidatesForJob(jobOrId) {
       await logActivity(
         job.id,
         data.id,
-        data.pipeline_stage === 'Shortlisted' ? 'CANDIDATE_SHORTLISTED' : data.pipeline_stage === 'Archived' ? 'CANDIDATE_ARCHIVED' : 'CANDIDATE_SOURCED',
-        `${data.name} scored ${data.fit_score || 0} (${data.fit_grade || 'UNKNOWN'}) for ${job.job_title}`,
+        'CANDIDATE_SOURCED',
+        `${data.name} sourced with score ${data.fit_score || 0}/100 and stage ${data.pipeline_stage}`,
         {
           fit_score: data.fit_score,
           fit_grade: data.fit_grade,
@@ -180,6 +187,27 @@ export async function sourceCandidatesForJob(jobOrId) {
           current_company: data.current_company,
         },
       );
+      // eslint-disable-next-line no-await-in-loop
+      await logActivity(
+        job.id,
+        data.id,
+        'CANDIDATE_SCORED',
+        `${data.name} scored ${data.fit_score || 0}/100`,
+        {
+          fit_score: data.fit_score,
+          fit_grade: data.fit_grade,
+          rationale: data.fit_rationale,
+          pipeline_stage: data.pipeline_stage,
+        },
+      );
+      if (data.pipeline_stage === 'Archived') {
+        // eslint-disable-next-line no-await-in-loop
+        await logActivity(job.id, data.id, 'CANDIDATE_ARCHIVED', `${data.name} archived after scoring`, {
+          fit_score: data.fit_score,
+          fit_grade: data.fit_grade,
+          rationale: data.fit_rationale,
+        });
+      }
     }
     // eslint-disable-next-line no-await-in-loop
     await sleep(1500);
@@ -207,6 +235,63 @@ export async function sourceCandidatesForJob(jobOrId) {
   ).catch(() => null);
 
   return { total: savedCandidates.length, hot, warm };
+}
+
+export async function scoreUnscoredCandidates(jobOrId) {
+  const job = await getJob(jobOrId);
+  if (!job) return 0;
+
+  const { data: unscored } = await supabase
+    .from('candidates')
+    .select('*')
+    .eq('job_id', job.id)
+    .is('fit_score', null)
+    .not('pipeline_stage', 'eq', 'Archived')
+    .limit(20);
+
+  if (!unscored?.length) return 0;
+
+  await logActivity(job.id, null, 'SCORING', `Scoring ${unscored.length} candidates`, {
+    candidate_ids: unscored.map((candidate) => candidate.id),
+  });
+
+  for (const candidate of unscored) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const score = await scoreCandidateAgainstJob(candidate, job);
+      const pipelineStage = score.fit_score >= 60 ? 'Shortlisted' : score.fit_score >= 30 ? 'Sourced' : 'Archived';
+
+      // eslint-disable-next-line no-await-in-loop
+      await supabase.from('candidates').update({
+        fit_score: score.fit_score,
+        fit_grade: score.fit_grade,
+        fit_rationale: score.fit_rationale,
+        pipeline_stage: pipelineStage,
+      }).eq('id', candidate.id);
+
+      // eslint-disable-next-line no-await-in-loop
+      await logActivity(job.id, candidate.id, 'CANDIDATE_SCORED', `${candidate.name || 'Candidate'} scored ${score.fit_score}/100`, {
+        fit_score: score.fit_score,
+        fit_grade: score.fit_grade,
+        rationale: score.fit_rationale,
+        pipeline_stage: pipelineStage,
+      });
+
+      if (pipelineStage === 'Archived') {
+        // eslint-disable-next-line no-await-in-loop
+        await logActivity(job.id, candidate.id, 'CANDIDATE_ARCHIVED', `${candidate.name || 'Candidate'} archived after scoring`, {
+          fit_score: score.fit_score,
+          fit_grade: score.fit_grade,
+          rationale: score.fit_rationale,
+        });
+      }
+    } catch (error) {
+      // eslint-disable-next-line no-await-in-loop
+      await logActivity(job.id, candidate.id, 'SCORE_ERROR', `Scoring failed: ${error.message}`, {});
+    }
+  }
+
+  return unscored.length;
 }
 
 async function extractResumeText(buffer) {

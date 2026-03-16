@@ -1,17 +1,14 @@
 import supabase from '../db/supabase.js';
 import { callClaude } from '../integrations/claude.js';
 import { sendTelegramMessage, getRecruiterChatId } from '../integrations/telegram.js';
-import { queueApproval } from './approvalService.js';
-import { logActivity } from './activityLogger.js';
+import { sleep, todayIsoDate } from '../lib_utils.js';
+import { queueApproval, executeApprovedSends } from './approvalService.js';
+import { logActivity, logActivityOncePerWindow } from './activityLogger.js';
 import { processEnrichmentQueue } from './enrichmentService.js';
-import { sourceCandidatesForJob } from './candidateSourcing.js';
+import { sourceCandidatesForJob, scoreUnscoredCandidates } from './candidateSourcing.js';
 import { getRuntimeState } from './runtimeState.js';
 import { isWithinSendingWindow } from './scheduleService.js';
 import { buildTemplateAwarePrompt } from './outreachTemplates.js';
-
-function todayIsoDate() {
-  return new Date().toISOString().slice(0, 10);
-}
 
 async function ensureDailyLimits(jobId) {
   const { data } = await supabase
@@ -26,9 +23,26 @@ async function draftMessage(prompt) {
   return callClaude(prompt, 'You write concise, warm recruiter outreach. Return plain text only.').catch(() => null);
 }
 
-export async function sendPendingConnectionRequests(job) {
+async function getPipelineCandidateCount(jobId, stages) {
+  const { count } = await supabase
+    .from('candidates')
+    .select('*', { count: 'exact', head: true })
+    .eq('job_id', jobId)
+    .in('pipeline_stage', stages);
+
+  return count || 0;
+}
+
+async function draftConnectionRequests(job) {
   const limits = await ensureDailyLimits(job.id);
-  const remaining = Math.max(0, (job.linkedin_daily_limit || 28) - (limits?.invites_sent || 0));
+  const pendingApprovals = await supabase
+    .from('approval_queue')
+    .select('*', { count: 'exact', head: true })
+    .eq('job_id', job.id)
+    .eq('channel', 'connection_request')
+    .in('status', ['pending', 'edited', 'approved']);
+  const queuedCount = pendingApprovals.count || 0;
+  const remaining = Math.max(0, (job.linkedin_daily_limit || 28) - ((limits?.invites_sent || 0) + queuedCount));
   if (!remaining) return 0;
 
   const { data: candidates } = await supabase
@@ -40,20 +54,35 @@ export async function sendPendingConnectionRequests(job) {
     .order('fit_score', { ascending: false })
     .limit(remaining);
 
+  let draftedCount = 0;
   for (const candidate of candidates || []) {
     // eslint-disable-next-line no-await-in-loop
     const message = await draftMessage(buildTemplateAwarePrompt(job, 'connection_request', `Write a LinkedIn connection request under 300 characters.\nCandidate: ${candidate.name}, ${candidate.current_title} at ${candidate.current_company}\nJob: ${job.job_title} at ${job.client_name}\nUse one specific hook from this profile: ${candidate.notes || candidate.tech_skills || candidate.current_company}.`));
     if (!message) continue;
     // eslint-disable-next-line no-await-in-loop
-    await queueApproval({ candidateId: candidate.id, jobId: job.id, channel: 'connection_request', stage: 'invite_sent', messageText: message.slice(0, 300) });
+    const approval = await queueApproval({
+      candidateId: candidate.id,
+      jobId: job.id,
+      channel: 'connection_request',
+      stage: 'invite_sent',
+      messageText: message.slice(0, 300),
+    });
+    if (approval) draftedCount += 1;
   }
 
-  return (candidates || []).length;
+  return draftedCount;
 }
 
-export async function sendPendingDMs(job) {
+async function draftFirstDMs(job) {
   const limits = await ensureDailyLimits(job.id);
-  const remaining = Math.max(0, 50 - (limits?.dms_sent || 0));
+  const pendingApprovals = await supabase
+    .from('approval_queue')
+    .select('*', { count: 'exact', head: true })
+    .eq('job_id', job.id)
+    .eq('channel', 'linkedin_dm')
+    .in('status', ['pending', 'edited', 'approved']);
+  const queuedCount = pendingApprovals.count || 0;
+  const remaining = Math.max(0, 50 - ((limits?.dms_sent || 0) + queuedCount));
   if (!remaining) return 0;
 
   const { data: candidates } = await supabase
@@ -64,18 +93,26 @@ export async function sendPendingDMs(job) {
     .order('fit_score', { ascending: false })
     .limit(remaining);
 
+  let draftedCount = 0;
   for (const candidate of candidates || []) {
     // eslint-disable-next-line no-await-in-loop
     const message = await draftMessage(buildTemplateAwarePrompt(job, 'linkedin_dm', `Write a personalized LinkedIn DM.\nCandidate: ${JSON.stringify(candidate)}\nJob: ${JSON.stringify(job)}\nReference something specific from their profile and mention salary if present.`));
     if (!message) continue;
     // eslint-disable-next-line no-await-in-loop
-    await queueApproval({ candidateId: candidate.id, jobId: job.id, channel: 'linkedin_dm', stage: 'dm_sent', messageText: message });
+    const approval = await queueApproval({
+      candidateId: candidate.id,
+      jobId: job.id,
+      channel: 'linkedin_dm',
+      stage: 'dm_sent',
+      messageText: message,
+    });
+    if (approval) draftedCount += 1;
   }
 
-  return (candidates || []).length;
+  return draftedCount;
 }
 
-export async function sendPendingEmails(job) {
+async function draftOutboundEmails(job) {
   const { data: candidates } = await supabase
     .from('candidates')
     .select('*')
@@ -85,15 +122,23 @@ export async function sendPendingEmails(job) {
     .order('fit_score', { ascending: false })
     .limit(25);
 
+  let draftedCount = 0;
   for (const candidate of candidates || []) {
     // eslint-disable-next-line no-await-in-loop
     const message = await draftMessage(buildTemplateAwarePrompt(job, 'email', `Write a longer-form recruiting email.\nCandidate: ${JSON.stringify(candidate)}\nJob: ${JSON.stringify(job)}\nInclude role, client, salary, and why the role is interesting.`));
     if (!message) continue;
     // eslint-disable-next-line no-await-in-loop
-    await queueApproval({ candidateId: candidate.id, jobId: job.id, channel: 'email', stage: 'email_sent', messageText: message });
+    const approval = await queueApproval({
+      candidateId: candidate.id,
+      jobId: job.id,
+      channel: 'email',
+      stage: 'email_sent',
+      messageText: message,
+    });
+    if (approval) draftedCount += 1;
   }
 
-  return (candidates || []).length;
+  return draftedCount;
 }
 
 function nextFollowUpDate(count) {
@@ -101,7 +146,7 @@ function nextFollowUpDate(count) {
   return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
 }
 
-export async function sendPendingFollowUps(job) {
+async function draftFollowUps(job) {
   const { data: candidates } = await supabase
     .from('candidates')
     .select('*')
@@ -109,35 +154,45 @@ export async function sendPendingFollowUps(job) {
     .in('pipeline_stage', ['dm_sent', 'email_sent'])
     .lte('follow_up_due_at', new Date().toISOString());
 
+  let draftedCount = 0;
   for (const candidate of candidates || []) {
     if ((candidate.follow_up_count || 0) >= 3) {
       // eslint-disable-next-line no-await-in-loop
       await supabase.from('candidates').update({
-        pipeline_stage: 'Withdrawn',
+        pipeline_stage: 'Archived',
         notes: `${candidate.notes || ''}\n[NO_RESPONSE_AFTER_FOLLOWUPS]`.trim(),
       }).eq('id', candidate.id);
+      // eslint-disable-next-line no-await-in-loop
+      await logActivity(job.id, candidate.id, 'CANDIDATE_ARCHIVED', `${candidate.name} archived after follow-up limit`, {
+        follow_up_count: candidate.follow_up_count || 0,
+      });
       continue;
     }
 
     // eslint-disable-next-line no-await-in-loop
     const message = await draftMessage(buildTemplateAwarePrompt(job, 'follow_up', `Write a brief recruiter follow-up. Candidate has not replied yet.\nCandidate: ${JSON.stringify(candidate)}\nJob: ${JSON.stringify(job)}`));
     if (!message) continue;
+
     // eslint-disable-next-line no-await-in-loop
-    await queueApproval({
+    const approval = await queueApproval({
       candidateId: candidate.id,
       jobId: job.id,
       channel: candidate.pipeline_stage === 'email_sent' ? 'email' : 'linkedin_dm',
       stage: candidate.pipeline_stage,
       messageText: message,
     });
-    // eslint-disable-next-line no-await-in-loop
-    await supabase.from('candidates').update({
-      follow_up_count: (candidate.follow_up_count || 0) + 1,
-      follow_up_due_at: nextFollowUpDate(candidate.follow_up_count || 0),
-    }).eq('id', candidate.id);
+
+    if (approval) {
+      draftedCount += 1;
+      // eslint-disable-next-line no-await-in-loop
+      await supabase.from('candidates').update({
+        follow_up_count: (candidate.follow_up_count || 0) + 1,
+        follow_up_due_at: nextFollowUpDate(candidate.follow_up_count || 0),
+      }).eq('id', candidate.id);
+    }
   }
 
-  return (candidates || []).length;
+  return draftedCount;
 }
 
 async function checkStuckStages(job) {
@@ -160,30 +215,47 @@ async function checkStuckStages(job) {
   }
 }
 
-export async function processJob(job, runtimeState) {
-  const withinSendingWindow = isWithinSendingWindow(job);
-  if (!withinSendingWindow) {
-    await logActivity(job.id, null, 'OUTSIDE_SENDING_WINDOW', `Outside sending window for ${job.job_title}; sourcing only`, {
+export async function runJobCycle(job, runtimeState) {
+  const withinWindow = isWithinSendingWindow(job);
+
+  if (runtimeState.researchEnabled) {
+    const candidateCount = await getPipelineCandidateCount(job.id, ['Sourced', 'Shortlisted', 'Enriched']);
+    const cooldownMs = 24 * 60 * 60 * 1000;
+    if (candidateCount < 10 && (!job.last_research_at || Date.now() - new Date(job.last_research_at).getTime() > cooldownMs)) {
+      await logActivity(job.id, null, 'AUTO_SOURCING', `Pipeline light (${candidateCount}), triggering sourcing`, {});
+      await sourceCandidatesForJob(job);
+      await supabase.from('jobs').update({ last_research_at: new Date().toISOString() }).eq('id', job.id);
+    }
+  }
+
+  await scoreUnscoredCandidates(job);
+
+  if (runtimeState.enrichmentEnabled) {
+    await processEnrichmentQueue(job.id);
+  }
+
+  if (runtimeState.linkedinEnabled && runtimeState.outreachEnabled) {
+    await draftConnectionRequests(job);
+    await draftFirstDMs(job);
+  }
+
+  if (runtimeState.outreachEnabled) {
+    await draftOutboundEmails(job);
+  }
+
+  if (runtimeState.followupEnabled) {
+    await draftFollowUps(job);
+  }
+
+  if (withinWindow) {
+    await executeApprovedSends(job);
+  } else {
+    await logActivityOncePerWindow(job.id, null, 'OUTSIDE_SENDING_WINDOW', `Outside sending window for ${job.job_title}; sourcing, scoring, enrichment, and drafting continue`, {
       send_from: job.send_from || '08:00',
       send_until: job.send_until || '18:00',
       timezone: job.timezone || 'Europe/London',
       active_days: job.active_days || 'Mon,Tue,Wed,Thu,Fri',
-    });
-    await checkStuckStages(job);
-    return;
-  }
-
-  if (runtimeState.linkedinEnabled && runtimeState.outreachEnabled) {
-    await sendPendingConnectionRequests(job);
-    await sendPendingDMs(job);
-  }
-
-  if (runtimeState.outreachEnabled) {
-    await sendPendingEmails(job);
-  }
-
-  if (runtimeState.followupEnabled) {
-    await sendPendingFollowUps(job);
+    }, 60);
   }
 
   await checkStuckStages(job);
@@ -195,27 +267,21 @@ export async function runOrchestratorCycle() {
     return { processed: 0, skipped: true };
   }
 
-  const { data: jobs } = await supabase.from('jobs').select('*').eq('status', 'ACTIVE');
+  const { data: jobs } = await supabase
+    .from('jobs')
+    .select('*')
+    .eq('status', 'ACTIVE')
+    .order('created_at', { ascending: true });
+
+  let processed = 0;
   for (const job of jobs || []) {
     if (job.paused) continue;
     try {
       // eslint-disable-next-line no-await-in-loop
-      const { count: sourcedCount } = await supabase.from('candidates').select('*', { count: 'exact', head: true }).eq('job_id', job.id).eq('pipeline_stage', 'Sourced');
-      const cooldownMs = 24 * 60 * 60 * 1000;
-      if (runtimeState.researchEnabled && (sourcedCount || 0) < 10 && (!job.last_research_at || Date.now() - new Date(job.last_research_at).getTime() > cooldownMs)) {
-        // eslint-disable-next-line no-await-in-loop
-        await sourceCandidatesForJob(job);
-        // eslint-disable-next-line no-await-in-loop
-        await supabase.from('jobs').update({ last_research_at: new Date().toISOString() }).eq('id', job.id);
-      }
-
-      if (runtimeState.enrichmentEnabled && isWithinSendingWindow(job)) {
-        // eslint-disable-next-line no-await-in-loop
-        await processEnrichmentQueue(job.id);
-      }
-
+      await runJobCycle(job, runtimeState);
+      processed += 1;
       // eslint-disable-next-line no-await-in-loop
-      await processJob(job, runtimeState);
+      await sleep(2000);
     } catch (error) {
       // eslint-disable-next-line no-await-in-loop
       await logActivity(job.id, null, 'ORCHESTRATOR_ERROR', error.message, {});
@@ -223,5 +289,5 @@ export async function runOrchestratorCycle() {
     }
   }
 
-  return { processed: jobs?.length || 0 };
+  return { processed };
 }

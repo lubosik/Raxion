@@ -75,20 +75,21 @@ export function createDashboardServer() {
     const [jobs, sourced, outreach, invites, accepted, replies, qualified, interviews, placements, approvals] = await Promise.all([
       supabase.from('jobs').select('*', { count: 'exact', head: true }).eq('status', 'ACTIVE'),
       supabase.from('candidates').select('*', { count: 'exact', head: true }),
-      supabase.from('candidates').select('*', { count: 'exact', head: true }).in('pipeline_stage', ['invite_sent', 'invite_accepted', 'dm_sent', 'email_sent', 'Replied', 'Qualified']),
+      supabase.from('candidates').select('*', { count: 'exact', head: true }).in('pipeline_stage', ['invite_sent', 'invite_accepted', 'dm_sent', 'email_sent', 'Replied', 'Qualified', 'Interview Booked', 'Interview Scheduled', 'Offered', 'Placed']),
       supabase.from('candidates').select('*', { count: 'exact', head: true }).not('invite_sent_at', 'is', null),
       supabase.from('candidates').select('*', { count: 'exact', head: true }).not('invite_accepted_at', 'is', null),
       supabase.from('candidates').select('*', { count: 'exact', head: true }).not('last_reply_at', 'is', null),
       supabase.from('candidates').select('*', { count: 'exact', head: true }).eq('pipeline_stage', 'Qualified'),
       supabase.from('candidates').select('*', { count: 'exact', head: true }).not('interview_booked_at', 'is', null),
       supabase.from('candidates').select('*', { count: 'exact', head: true }).eq('pipeline_stage', 'Placed'),
-      supabase.from('approval_queue').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
+      supabase.from('approval_queue').select('*', { count: 'exact', head: true }).in('status', ['pending', 'edited']),
     ]);
 
     const acceptanceRate = (invites.count || 0) ? ((accepted.count || 0) / invites.count) * 100 : 0;
     res.json({
       active_jobs: jobs.count || 0,
       candidates_sourced: sourced.count || 0,
+      outreach_sent: outreach.count || 0,
       candidates_in_outreach: outreach.count || 0,
       invites_sent: invites.count || 0,
       acceptance_rate: acceptanceRate,
@@ -116,7 +117,7 @@ export function createDashboardServer() {
   app.get('/api/health', async (req, res) => {
     const [{ count: webhookCount }, { count: queueCount }, state] = await Promise.all([
       supabase.from('webhook_logs').select('*', { count: 'exact', head: true }),
-      supabase.from('approval_queue').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
+      supabase.from('approval_queue').select('*', { count: 'exact', head: true }).in('status', ['pending', 'edited']),
       getRuntimeState(),
     ]);
 
@@ -227,22 +228,30 @@ export function createDashboardServer() {
   });
 
   app.get('/api/jobs/:id/activity', async (req, res) => {
-    const { data } = await supabase.from('activity_log').select('*').eq('job_id', req.params.id).order('created_at', { ascending: false }).limit(100);
+    let query = supabase.from('activity_log').select('*').eq('job_id', req.params.id).order('created_at', { ascending: false }).limit(200);
+    if (req.query.eventType) query = query.eq('event_type', req.query.eventType);
+    const { data } = await query;
     res.json(data || []);
   });
 
   app.get('/api/jobs/:id/approval-queue', async (req, res) => {
-    const { data } = await supabase.from('approval_queue').select('*').eq('job_id', req.params.id).eq('status', 'pending').order('created_at', { ascending: false });
+    const { data } = await supabase
+      .from('approval_queue')
+      .select('*, candidates(name, current_title, current_company, fit_score, fit_grade), jobs(job_title, client_name)')
+      .eq('job_id', req.params.id)
+      .in('status', ['pending', 'edited', 'approved'])
+      .order('created_at', { ascending: false });
     res.json(data || []);
   });
 
   app.get('/api/candidates/:id', async (req, res) => {
-    const [{ data: candidate }, { data: conversations }, { data: activity }] = await Promise.all([
+    const [{ data: candidate }, { data: conversations }, { data: activity }, { data: approvals }] = await Promise.all([
       supabase.from('candidates').select('*').eq('id', req.params.id).single(),
       supabase.from('conversations').select('*').eq('candidate_id', req.params.id).order('sent_at', { ascending: true }),
       supabase.from('activity_log').select('*').eq('candidate_id', req.params.id).order('created_at', { ascending: false }),
+      supabase.from('approval_queue').select('*').eq('candidate_id', req.params.id).in('status', ['pending', 'edited', 'approved']).order('created_at', { ascending: false }),
     ]);
-    res.json({ ...candidate, conversation_history: conversations || [], activity_log: activity || [] });
+    res.json({ ...candidate, conversation_history: conversations || [], activity_log: activity || [], approvals: approvals || [] });
   });
 
   app.post('/api/candidates/:id/stage', async (req, res) => {
@@ -281,7 +290,12 @@ export function createDashboardServer() {
   });
 
   app.get('/api/inbox', async (req, res) => {
-    const { data } = await supabase.from('conversations').select('*, candidates(name, job_id), jobs(job_title, client_name)').eq('direction', 'inbound').order('sent_at', { ascending: false }).limit(100);
+    const { data } = await supabase
+      .from('conversations')
+      .select('*, candidates(id, name, current_company, job_id), jobs(job_title, client_name)')
+      .eq('direction', 'inbound')
+      .order('sent_at', { ascending: false })
+      .limit(200);
     res.json(data || []);
   });
 
@@ -291,7 +305,11 @@ export function createDashboardServer() {
   });
 
   app.get('/api/approval-queue', async (req, res) => {
-    const { data } = await supabase.from('approval_queue').select('*').eq('status', 'pending').order('created_at', { ascending: false });
+    const { data } = await supabase
+      .from('approval_queue')
+      .select('*, candidates(name, current_title, current_company, fit_score, fit_grade), jobs(job_title, client_name)')
+      .in('status', ['pending', 'edited', 'approved'])
+      .order('created_at', { ascending: false });
     res.json(data || []);
   });
 
