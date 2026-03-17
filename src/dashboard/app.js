@@ -58,6 +58,7 @@
 
   const JOB_TABS = [
     ['overview', 'Overview'],
+    ['settings', 'Settings'],
     ['all_candidates', 'All Candidates'],
     ['applicants', 'Applicants'],
     ['shortlisted', 'Shortlisted'],
@@ -554,6 +555,7 @@
           )
           : '') +
         '<label class="form-span-2"><span>Role Notes</span><textarea class="input textarea" name="notes" placeholder="What makes a good candidate, market notes, messaging context, client nuances."></textarea></label>' +
+        '<label class="form-span-2"><span>Qualified Candidate Criteria</span><textarea class="input textarea" name="qualified_criteria" rows="3" placeholder="e.g. Minimum 5 years experience in real estate sales, must hold a valid US licence, open to full-time, salary expectation under $120k"></textarea><small class="form-help">Raxion uses this to decide if a candidate is qualified during conversation. Be specific - this is injected directly into the reply logic for this job only.</small></label>' +
         (state.createJobMode !== 'outbound'
           ? (
             '<div class="form-span-2"><div class="section-head"><div><div class="label-caps">Team Members</div><h3 class="section-title small">Shortlist and Interview Notifications</h3></div><button class="btn btn-secondary btn-sm" type="button" data-action="add-team-member">Add Team Member</button></div>' +
@@ -656,6 +658,10 @@
               Object.entries(counts).map(([stage, count]) => `<div class="snapshot-card"><div>${stageChip(stage)}</div><strong>${esc(count)}</strong></div>`).join('') +
             '</div>' +
           '</div>' +
+          '<div class="surface">' +
+            '<div class="section-head"><div><div class="label-caps">Qualification Criteria</div><h2 class="section-title">Role Qualification Bar</h2></div><button class="btn btn-secondary btn-sm" data-action="set-job-tab" data-id="settings">Edit</button></div>' +
+            '<p>' + esc(job.qualified_criteria || 'No job-specific qualification criteria set. Raxion will fall back to the role requirements and fit score.') + '</p>' +
+          '</div>' +
           '<form id="job-schedule-form" class="surface form-grid" data-job-id="' + esc(job.id) + '">' +
             '<div class="form-span-2"><div class="label-caps">Sending Settings</div><h2 class="section-title">Per-Job Outreach Windows</h2><div class="job-detail-sub">These values are live. Raxion will use them on the next cycle for this job.</div></div>' +
             '<label><span>Timezone</span><input class="input" name="timezone" value="' + esc(job.timezone || 'Europe/London') + '" placeholder="America/New_York" /></label>' +
@@ -681,6 +687,14 @@
             '</div>' +
           '</div>' +
         '</section>'
+      );
+    } else if (state.selectedJobTab === 'settings') {
+      content = (
+        '<form id="job-settings-form" class="surface form-grid" data-job-id="' + esc(job.id) + '">' +
+          '<div class="form-span-2"><div class="label-caps">Settings</div><h2 class="section-title">Per-Job Criteria</h2></div>' +
+          '<label class="form-span-2"><span>Qualified Candidate Criteria</span><textarea class="input textarea" name="qualified_criteria" rows="5">' + esc(job.qualified_criteria || '') + '</textarea><small class="form-help">This qualification bar is injected into reply classification and scoring for this job only.</small></label>' +
+          '<div class="form-span-2 button-row"><button class="btn btn-primary" type="submit">Save Settings</button></div>' +
+        '</form>'
       );
     } else if (state.selectedJobTab === 'applicants') {
       const shortlistedApplicants = applicants.filter((candidate) => ['HOT', 'WARM'].includes(candidate.fit_grade));
@@ -1435,6 +1449,20 @@
         body: JSON.stringify({ outreach_templates: templates }),
       });
       showToast('Templates saved.');
+      await loadSelectedJob(jobId);
+      return;
+    }
+
+    if (event.target.id === 'job-settings-form') {
+      event.preventDefault();
+      const jobId = event.target.dataset.jobId;
+      const payload = Object.fromEntries(new FormData(event.target).entries());
+      await request(`/api/jobs/${jobId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      showToast('Job settings saved.');
       await loadSelectedJob(jobId);
       return;
     }

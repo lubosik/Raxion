@@ -1054,6 +1054,14 @@ tbody tr:last-child td {
   background: var(--panel-alt);
 }
 
+.form-help {
+  display: block;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
 .tag {
   padding: 6px 10px;
   background: var(--panel-alt);

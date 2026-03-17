@@ -14,18 +14,46 @@ import {
 } from './conversationState.js';
 
 async function classifyReply(candidate, job, conversationHistory, messageText) {
+  const qualificationBlock = job.qualified_criteria
+    ? `\n\nQUALIFICATION CRITERIA FOR THIS ROLE:\n${job.qualified_criteria}\n\nA candidate is QUALIFIED if they meet these criteria. A candidate is NOT QUALIFIED if they clearly fall short of any of these requirements.`
+    : '\n\nNo specific qualification criteria defined - use general fit score and role requirements to assess.';
   return callClaude(
-    `Classify this recruiting reply and return JSON.\nCandidate: ${JSON.stringify(candidate)}\nJob: ${JSON.stringify(job)}\nRecruiter identity: ${getSenderSignature(job)}\nAgent guidance: ${getAgentGuidanceBlock() || 'None'}\nConversation history: ${JSON.stringify(conversationHistory)}\nNew message: ${messageText}\nIf you provide suggested_reply, write it in the recruiter's voice, keep it consistent with the conversation history, and end it with the exact recruiter signature.\nAlso decide whether the conversation should be recommended for closure because the thread has reached a natural conclusion, been declined, been booked, or been deferred.\nReturn {"intent":"interested|not_interested|maybe_later|question|referral|booking_confirmed|other","sentiment":"positive|neutral|negative","key_points":"","concerns":"","qualified":true/false,"next_action":"send_booking_link|answer_question|escalate|archive|continue_conversation","suggested_reply":"","should_end_conversation":true/false,"end_reason":""}.`,
-    'You are a recruiting conversation classifier. Return valid JSON only.',
+    `You are classifying a candidate reply for the role: ${job.job_title} at ${job.client_name}.
+${qualificationBlock}
+
+Recruiter identity: ${getSenderSignature(job)}
+Agent guidance: ${getAgentGuidanceBlock() || 'None'}
+
+Conversation so far:
+${JSON.stringify(conversationHistory)}
+
+Latest reply from candidate:
+${messageText}
+
+If you provide suggested_reply, write it in the recruiter's voice, keep it consistent with the conversation history, and end it with the exact recruiter signature.
+Also decide whether the conversation should be recommended for closure because the thread has reached a natural conclusion, been declined, been booked, or been deferred.
+
+Logic:
+- If qualified: true, next_action should usually be push_for_booking.
+- If qualified: false, next_action should usually be polite_decline.
+- If qualified: null because key information is missing, next_action should usually be ask_qualifying_question.
+- If they asked a direct question, use answer_question.
+- If they are not interested, use archive.
+
+Return ONLY valid JSON:
+{"intent":"interested|not_interested|asking_question|neutral|maybe_later|referral|booking_confirmed|other","sentiment":"positive|neutral|negative","key_points":"","concerns":"","qualified":true|false|null,"qualification_notes":"","next_action":"ask_qualifying_question|push_for_booking|polite_decline|answer_question|continue_conversation|archive","suggested_reply":"","qualifying_question_to_ask":"","should_end_conversation":true|false,"end_reason":""}.`,
+    'You are a recruiting conversation classifier. Follow the role-specific qualification criteria when present. Return valid JSON only.',
     { expectJson: true },
   ).catch(() => ({
     intent: 'other',
     sentiment: 'neutral',
     key_points: 'Classification failed',
     concerns: '',
-    qualified: false,
-    next_action: 'escalate',
+    qualified: null,
+    qualification_notes: '',
+    next_action: 'continue_conversation',
     suggested_reply: '',
+    qualifying_question_to_ask: '',
     should_end_conversation: false,
     end_reason: '',
   }));
@@ -242,13 +270,29 @@ export async function processIncomingMessage(webhookPayload) {
     await sendTelegramMessage(getRecruiterChatId(), `⭐ ${candidate.name} is QUALIFIED for ${job.job_title} - booking message queued for your approval`).catch(() => null);
   }
 
-  if (classification.next_action === 'send_booking_link' && job?.calendly_link) {
+  if (classification.next_action === 'push_for_booking' && job?.calendly_link) {
     await queueApproval({
       candidateId: candidate.id,
       jobId: candidate.job_id,
       channel: 'linkedin_dm',
       stage: 'Qualified',
-      messageText: ensureSignedMessage(job, `Thanks for the reply. You can book a time here: ${job.calendly_link}`),
+      messageText: ensureSignedMessage(job, classification.suggested_reply || `Thanks for the reply. You can book a time here: ${job.calendly_link}`),
+    });
+  } else if (classification.next_action === 'push_for_booking') {
+    await queueApproval({
+      candidateId: candidate.id,
+      jobId: candidate.job_id,
+      channel: 'linkedin_dm',
+      stage: 'Qualified',
+      messageText: ensureSignedMessage(job, classification.suggested_reply),
+    });
+  } else if (classification.next_action === 'ask_qualifying_question') {
+    await queueApproval({
+      candidateId: candidate.id,
+      jobId: candidate.job_id,
+      channel: 'linkedin_dm',
+      stage: candidate.pipeline_stage,
+      messageText: ensureSignedMessage(job, classification.suggested_reply || classification.qualifying_question_to_ask),
     });
   } else if (classification.next_action === 'answer_question' || classification.next_action === 'continue_conversation') {
     await queueApproval({
@@ -256,6 +300,14 @@ export async function processIncomingMessage(webhookPayload) {
       jobId: candidate.job_id,
       channel: 'linkedin_dm',
       stage: candidate.pipeline_stage,
+      messageText: ensureSignedMessage(job, classification.suggested_reply),
+    });
+  } else if (classification.next_action === 'polite_decline') {
+    await queueApproval({
+      candidateId: candidate.id,
+      jobId: candidate.job_id,
+      channel: 'linkedin_dm',
+      stage: 'Archived',
       messageText: ensureSignedMessage(job, classification.suggested_reply),
     });
   } else if (classification.next_action === 'archive') {
@@ -271,8 +323,6 @@ export async function processIncomingMessage(webhookPayload) {
       concerns: classification.concerns,
       final_reply_pending: true,
     });
-  } else if (classification.next_action === 'escalate') {
-    await sendTelegramMessage(getRecruiterChatId(), `💬 ${candidate.name} replied and needs manual recruiter handling for ${job.job_title}`).catch(() => null);
   }
 
   await logActivity(candidate.job_id, candidate.id, 'REPLY_RECEIVED', `${candidate.name} replied on LinkedIn`, {

@@ -30,6 +30,7 @@ export function normalizeJobRecord(job) {
     seniority_level: job.seniority_level || job.seniority || null,
     tech_stack_must: job.tech_stack_must || job.must_have_stack || null,
     full_job_description: job.full_job_description || job.raw_brief || job.candidate_profile || null,
+    qualified_criteria: job.qualified_criteria || null,
     job_mode: job.job_mode || 'outbound',
     paused,
   };
@@ -54,6 +55,7 @@ export async function prepareJobPayload(input) {
     'tech_stack_must',
     'must_have_stack',
     'tech_stack_nice',
+    'qualified_criteria',
     'candidate_profile',
     'full_job_description',
     'raw_brief',
@@ -96,6 +98,7 @@ export async function prepareJobPayload(input) {
     tech_stack_must: input.tech_stack_must || input.must_have_stack,
     must_have_stack: input.must_have_stack || input.tech_stack_must,
     tech_stack_nice: input.tech_stack_nice,
+    qualified_criteria: input.qualified_criteria,
     candidate_profile: input.candidate_profile || input.raw_brief || input.full_job_description,
     full_job_description: input.full_job_description || input.raw_brief || input.candidate_profile,
     raw_brief: input.raw_brief || input.full_job_description || input.candidate_profile,

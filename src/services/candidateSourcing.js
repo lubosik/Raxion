@@ -426,6 +426,9 @@ Return {"queries":[{"keywords":"","location":"","network_distance":[1,2]}]}.`,
 
 export async function scoreCandidateAgainstJob(candidateProfile, job) {
   const searchProfile = buildJobSearchProfile(job);
+  const criteriaContext = job.qualified_criteria
+    ? `\n\nQualification bar for this role: ${job.qualified_criteria}`
+    : '';
   const result = await callClaude(
     `Score this candidate for this exact role only and return JSON.
 Ignore every other job, previous search, previous candidate, and any outside context.
@@ -441,7 +444,7 @@ Scoring criteria:
 - Seniority and years experience fit (25)
 - Location/market fit (15)
 - Profile quality and credibility (20)
-Return {"fit_score":0-100,"fit_grade":"HOT|WARM|POSSIBLE|ARCHIVE","fit_rationale":""}.`,
+Return {"fit_score":0-100,"fit_grade":"HOT|WARM|POSSIBLE|ARCHIVE","fit_rationale":""}.${criteriaContext}`,
     'You are a rigorous recruiting evaluator. Use only the current role and current candidate. If the candidate is clearly outside the required domain or far below the role seniority, score harshly and return ARCHIVE. Return valid JSON only.',
     { expectJson: true },
   ).catch(() => null);
