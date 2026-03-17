@@ -9,8 +9,8 @@ import { logActivity, logActivityOncePerWindow } from './activityLogger.js';
 import { processEnrichmentQueue } from './enrichmentService.js';
 import { sourceCandidatesForJob, scoreUnscoredCandidates } from './candidateSourcing.js';
 import { getRuntimeState } from './runtimeState.js';
-import { isWithinSendingWindow } from './scheduleService.js';
-import { buildTemplateAwarePrompt } from './outreachTemplates.js';
+import { getChannelWindow, isWithinSendingWindow } from './scheduleService.js';
+import { buildTemplateAwarePrompt, parseTemplates } from './outreachTemplates.js';
 import { normalizeJobRecord } from './dbCompat.js';
 
 async function ensureDailyLimits(jobId) {
@@ -249,7 +249,8 @@ async function checkStuckStages(job) {
 }
 
 export async function runJobCycle(job, runtimeState) {
-  const withinWindow = isWithinSendingWindow(job);
+  const withinDefaultWindow = isWithinSendingWindow(job);
+  const withinInviteWindow = isWithinSendingWindow(job, new Date(), 'linkedin_invite');
 
   if (runtimeState.researchEnabled) {
     const pipelineTarget = getNumericRuntimeValue('RAXION_SOURCING_PIPELINE_TARGET', 25);
@@ -273,7 +274,7 @@ export async function runJobCycle(job, runtimeState) {
     await processEnrichmentQueue(job.id);
   }
 
-  if (withinWindow && runtimeState.linkedinEnabled && runtimeState.outreachEnabled) {
+  if (withinInviteWindow && runtimeState.linkedinEnabled && runtimeState.outreachEnabled) {
     await sendAutonomousConnectionRequests(job);
   }
 
@@ -289,14 +290,17 @@ export async function runJobCycle(job, runtimeState) {
     await draftFollowUps(job);
   }
 
-  if (withinWindow) {
+  if (withinDefaultWindow || isWithinSendingWindow(job, new Date(), 'linkedin_dm') || isWithinSendingWindow(job, new Date(), 'email')) {
     await executeApprovedSends(job);
   } else {
+    const defaultWindow = getChannelWindow(job, 'default');
+    const templates = parseTemplates(job.outreach_templates);
     await logActivityOncePerWindow(job.id, null, 'OUTSIDE_SENDING_WINDOW', `Outside sending window for ${job.job_title}; sourcing, scoring, enrichment, and drafting continue`, {
-      send_from: job.send_from || '08:00',
-      send_until: job.send_until || '18:00',
-      timezone: job.timezone || 'Europe/London',
-      active_days: job.active_days || 'Mon,Tue,Wed,Thu,Fri',
+      send_from: defaultWindow.send_from,
+      send_until: defaultWindow.send_until,
+      timezone: defaultWindow.timezone,
+      active_days: defaultWindow.active_days,
+      schedule_windows: templates.schedule_windows || {},
     }, 60);
   }
 

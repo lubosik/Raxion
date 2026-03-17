@@ -1,4 +1,4 @@
-function parseTemplates(rawTemplates) {
+export function parseTemplates(rawTemplates) {
   if (!rawTemplates) return {};
   if (typeof rawTemplates === 'object') return rawTemplates;
 

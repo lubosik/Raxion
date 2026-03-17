@@ -43,6 +43,33 @@ const DISQUALIFYING_JUNIOR_TERMS = [
   'trainee',
 ];
 
+const EXECUTIVE_TERMS = [
+  'chief',
+  'cfo',
+  'ceo',
+  'coo',
+  'cto',
+  'cro',
+  'cio',
+  'cmo',
+  'president',
+  'vice president',
+  'vp ',
+  'vp,',
+  'founder',
+  'co-founder',
+  'managing director',
+];
+
+const SENIOR_TERMS = [
+  'senior',
+  'lead',
+  'principal',
+  'director',
+  'head',
+  'manager',
+];
+
 const ROLE_SIGNAL_RULES = [
   {
     matches: ['real estate', 'estate agent', 'realtor', 'property'],
@@ -55,6 +82,10 @@ const ROLE_SIGNAL_RULES = [
   {
     matches: ['software engineer', 'developer', 'backend', 'frontend', 'full stack'],
     requireAny: ['software', 'engineer', 'developer', 'backend', 'frontend', 'full stack', 'javascript', 'node', 'react', 'python'],
+  },
+  {
+    matches: ['chief', 'cfo', 'ceo', 'coo', 'cto', 'cro', 'president', 'vice president', 'managing director', 'founder', 'c-suite'],
+    requireAny: ['chief', 'cfo', 'ceo', 'coo', 'cto', 'cro', 'president', 'vice president', 'managing director', 'founder'],
   },
 ];
 
@@ -245,11 +276,15 @@ function buildJobSearchProfile(job) {
   const scoringGuidance = compactText(getRuntimeConfigValue('RAXION_SCORING_GUIDANCE', ''));
   const seniorityText = compactText(job.seniority_level || '');
   const isSeniorRole = minimumYears >= 5 || /\b(senior|lead|principal|director|head)\b/i.test(seniorityText) || /\b(senior|lead|principal|director|head)\b/i.test(job.job_title || '');
+  const isExecutiveRole = /\b(chief|cfo|ceo|coo|cto|cro|cio|cmo|president|vice president|vp|managing director|founder|c-suite)\b/i.test(`${job.job_title || ''} ${seniorityText}`);
+  const isJuniorRole = !isExecutiveRole && !isSeniorRole && /\b(junior|entry|trainee|intern|assistant|associate|graduate)\b/i.test(`${job.job_title || ''} ${seniorityText}`);
 
   return {
     minimumYears,
     requiredSignals,
     isSeniorRole,
+    isExecutiveRole,
+    isJuniorRole,
     searchGuidance,
     scoringGuidance,
   };
@@ -275,11 +310,34 @@ function evaluateCandidateRelevance(profile, job) {
   const haystack = buildCandidateHaystack(profile);
   const yearsExperience = Number(profile.years_experience || (Array.isArray(profile.work_experience) ? profile.work_experience.length : 0) || 0);
   const juniorMarker = DISQUALIFYING_JUNIOR_TERMS.find((term) => haystack.includes(term));
+  const hasExecutiveSignals = EXECUTIVE_TERMS.some((term) => haystack.includes(term));
+  const hasSeniorSignals = SENIOR_TERMS.some((term) => haystack.includes(term));
 
-  if (searchProfile.isSeniorRole && juniorMarker && yearsExperience < Math.max(3, searchProfile.minimumYears)) {
+  if ((searchProfile.isSeniorRole || searchProfile.isExecutiveRole) && juniorMarker && yearsExperience < Math.max(3, searchProfile.minimumYears)) {
     return {
       accepted: false,
       reason: `Rejected as likely junior profile due to "${juniorMarker}" for a senior role`,
+    };
+  }
+
+  if (searchProfile.isExecutiveRole && !hasExecutiveSignals && yearsExperience < Math.max(8, searchProfile.minimumYears || 8)) {
+    return {
+      accepted: false,
+      reason: 'Rejected for lacking executive-level signals for a C-suite or leadership role',
+    };
+  }
+
+  if (searchProfile.isJuniorRole && hasExecutiveSignals) {
+    return {
+      accepted: false,
+      reason: 'Rejected for being too senior for a junior or early-career role',
+    };
+  }
+
+  if (searchProfile.isJuniorRole && hasSeniorSignals && yearsExperience >= 8) {
+    return {
+      accepted: false,
+      reason: 'Rejected for being materially over-senior for a junior role',
     };
   }
 

@@ -10,6 +10,7 @@ import {
   prepareApprovalUpdatePayload,
   prepareConversationInsertPayload,
 } from './dbCompat.js';
+import { isWithinSendingWindow } from './scheduleService.js';
 
 const UNSENT_APPROVAL_STATUSES = ['pending', 'edited', 'approved'];
 
@@ -276,6 +277,16 @@ export async function executeApprovedSends(job) {
 
   for (const approval of approvals || []) {
     const normalizedApproval = normalizeApprovalRecord(approval);
+    const scheduleChannel = normalizedApproval.channel === 'linkedin_dm'
+      ? 'linkedin_dm'
+      : normalizedApproval.channel === 'email'
+        ? 'email'
+        : 'default';
+
+    if (!isWithinSendingWindow(job, new Date(), scheduleChannel)) {
+      continue;
+    }
+
     if (normalizedApproval.channel === 'connection_request') {
       // Legacy queue items are ignored now that invites send autonomously.
       // eslint-disable-next-line no-await-in-loop

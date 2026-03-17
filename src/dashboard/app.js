@@ -231,6 +231,34 @@
     }
   }
 
+  function getScheduleWindows(job) {
+    const templates = parseTemplates(job?.outreach_templates);
+    const scheduleWindows = templates.schedule_windows || {};
+    const fallback = {
+      send_from: job?.send_from || '08:00',
+      send_until: job?.send_until || '18:00',
+    };
+
+    return {
+      default: {
+        send_from: fallback.send_from,
+        send_until: fallback.send_until,
+      },
+      linkedin_invite: {
+        send_from: scheduleWindows.linkedin_invite?.send_from || fallback.send_from,
+        send_until: scheduleWindows.linkedin_invite?.send_until || fallback.send_until,
+      },
+      linkedin_dm: {
+        send_from: scheduleWindows.linkedin_dm?.send_from || fallback.send_from,
+        send_until: scheduleWindows.linkedin_dm?.send_until || fallback.send_until,
+      },
+      email: {
+        send_from: scheduleWindows.email?.send_from || fallback.send_from,
+        send_until: scheduleWindows.email?.send_until || fallback.send_until,
+      },
+    };
+  }
+
   function activityGroupFor(eventType) {
     const type = String(eventType || '');
     if (/ERROR|FAILED/.test(type)) return 'errors';
@@ -498,6 +526,7 @@
 
     let content = '';
     if (state.selectedJobTab === 'overview') {
+      const scheduleWindows = getScheduleWindows(job);
       content = (
         '<section class="view-section">' +
           '<div class="metric-strip metric-strip-job">' +
@@ -512,6 +541,30 @@
             '<div class="section-head"><div><div class="label-caps">Pipeline Snapshot</div><h2 class="section-title">Stage Breakdown</h2></div></div>' +
             '<div class="job-snapshot-grid">' +
               Object.entries(counts).map(([stage, count]) => `<div class="snapshot-card"><div>${stageChip(stage)}</div><strong>${esc(count)}</strong></div>`).join('') +
+            '</div>' +
+          '</div>' +
+          '<form id="job-schedule-form" class="surface form-grid" data-job-id="' + esc(job.id) + '">' +
+            '<div class="form-span-2"><div class="label-caps">Sending Settings</div><h2 class="section-title">Per-Job Outreach Windows</h2><div class="job-detail-sub">These values are live. Raxion will use them on the next cycle for this job.</div></div>' +
+            '<label><span>Timezone</span><input class="input" name="timezone" value="' + esc(job.timezone || 'Europe/London') + '" placeholder="America/New_York" /></label>' +
+            '<label><span>Active Days</span><input class="input" name="active_days" value="' + esc(job.active_days || 'Mon,Tue,Wed,Thu,Fri') + '" placeholder="Mon,Tue,Wed,Thu,Fri" /></label>' +
+            '<label><span>Default Window Start</span><input class="input" name="send_from" value="' + esc(scheduleWindows.default.send_from) + '" placeholder="09:00" /></label>' +
+            '<label><span>Default Window End</span><input class="input" name="send_until" value="' + esc(scheduleWindows.default.send_until) + '" placeholder="17:00" /></label>' +
+            '<label><span>LinkedIn Requests Start</span><input class="input" name="linkedin_invite_send_from" value="' + esc(scheduleWindows.linkedin_invite.send_from) + '" placeholder="' + esc(scheduleWindows.default.send_from) + '" /></label>' +
+            '<label><span>LinkedIn Requests End</span><input class="input" name="linkedin_invite_send_until" value="' + esc(scheduleWindows.linkedin_invite.send_until) + '" placeholder="' + esc(scheduleWindows.default.send_until) + '" /></label>' +
+            '<label><span>LinkedIn DMs Start</span><input class="input" name="linkedin_dm_send_from" value="' + esc(scheduleWindows.linkedin_dm.send_from) + '" placeholder="' + esc(scheduleWindows.default.send_from) + '" /></label>' +
+            '<label><span>LinkedIn DMs End</span><input class="input" name="linkedin_dm_send_until" value="' + esc(scheduleWindows.linkedin_dm.send_until) + '" placeholder="' + esc(scheduleWindows.default.send_until) + '" /></label>' +
+            '<label><span>Email Start</span><input class="input" name="email_send_from" value="' + esc(scheduleWindows.email.send_from) + '" placeholder="' + esc(scheduleWindows.default.send_from) + '" /></label>' +
+            '<label><span>Email End</span><input class="input" name="email_send_until" value="' + esc(scheduleWindows.email.send_until) + '" placeholder="' + esc(scheduleWindows.default.send_until) + '" /></label>' +
+            '<div class="form-span-2 button-row"><button class="btn btn-primary" type="submit">Save Sending Settings</button></div>' +
+          '</form>' +
+          '<div class="surface">' +
+            '<div class="section-head"><div><div class="label-caps">Current Schedule</div><h2 class="section-title">Live Windows</h2></div></div>' +
+            '<div class="job-snapshot-grid">' +
+              `<div class="snapshot-card"><div class="candidate-sub">Timezone</div><strong>${esc(job.timezone || 'Europe/London')}</strong></div>` +
+              `<div class="snapshot-card"><div class="candidate-sub">Active Days</div><strong>${esc(job.active_days || 'Mon,Tue,Wed,Thu,Fri')}</strong></div>` +
+              `<div class="snapshot-card"><div class="candidate-sub">LinkedIn Requests</div><strong>${esc(scheduleWindows.linkedin_invite.send_from)} - ${esc(scheduleWindows.linkedin_invite.send_until)}</strong></div>` +
+              `<div class="snapshot-card"><div class="candidate-sub">LinkedIn DMs</div><strong>${esc(scheduleWindows.linkedin_dm.send_from)} - ${esc(scheduleWindows.linkedin_dm.send_until)}</strong></div>` +
+              `<div class="snapshot-card"><div class="candidate-sub">Email</div><strong>${esc(scheduleWindows.email.send_from)} - ${esc(scheduleWindows.email.send_until)}</strong></div>` +
             '</div>' +
           '</div>' +
         '</section>'
@@ -1026,6 +1079,46 @@
       });
       showToast('Templates saved.');
       await loadSelectedJob(jobId);
+      return;
+    }
+
+    if (event.target.id === 'job-schedule-form') {
+      event.preventDefault();
+      const jobId = event.target.dataset.jobId;
+      const payload = Object.fromEntries(new FormData(event.target).entries());
+      const job = state.selectedJobDetail || {};
+      const templates = parseTemplates(job.outreach_templates);
+      templates.schedule_windows = {
+        linkedin_invite: {
+          send_from: payload.linkedin_invite_send_from || payload.send_from,
+          send_until: payload.linkedin_invite_send_until || payload.send_until,
+        },
+        linkedin_dm: {
+          send_from: payload.linkedin_dm_send_from || payload.send_from,
+          send_until: payload.linkedin_dm_send_until || payload.send_until,
+        },
+        email: {
+          send_from: payload.email_send_from || payload.send_from,
+          send_until: payload.email_send_until || payload.send_until,
+        },
+      };
+
+      await request(`/api/jobs/${jobId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          timezone: payload.timezone,
+          active_days: payload.active_days,
+          send_from: payload.send_from,
+          send_until: payload.send_until,
+          outreach_templates: templates,
+        }),
+      });
+      showToast('Sending settings saved.');
+      await loadSelectedJob(jobId);
+      await loadCoreData();
+      state.view = 'jobs';
+      render();
       return;
     }
 
