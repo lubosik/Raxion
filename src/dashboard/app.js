@@ -14,8 +14,10 @@
     selectedJobId: null,
     selectedJobDetail: null,
     selectedJobCandidates: [],
+    selectedJobApplicants: [],
     selectedJobActivity: [],
     selectedJobApprovals: [],
+    selectedJobTeamMembers: [],
     selectedJobTab: 'all_candidates',
     selectedActivityGroup: 'all',
     selectedGlobalActivityGroup: 'all',
@@ -25,6 +27,9 @@
     editingApprovalText: '',
     candidatePanelId: null,
     candidatePanelDetail: null,
+    createJobMode: 'outbound',
+    createPostingMode: 'existing',
+    createJobTeamMembers: [{ name: '', email: '', telegram_chat_id: '', notify_on_shortlist: true, notify_on_interview_scheduled: true }],
     loading: false,
   };
 
@@ -43,6 +48,8 @@
     email_sent: { cls: 'stage-email', label: 'Email Sent' },
     Replied: { cls: 'stage-replied', label: 'Replied' },
     Qualified: { cls: 'stage-qualified', label: 'Qualified' },
+    Applied: { cls: 'stage-sourced', label: 'Applied' },
+    'Interview Scheduled': { cls: 'stage-qualified', label: 'Interview Scheduled' },
     Rejected: { cls: 'stage-rejected', label: 'Rejected' },
     Archived: { cls: 'stage-archived', label: 'Archived' },
     Withdrawn: { cls: 'stage-withdrawn', label: 'Withdrawn' },
@@ -52,6 +59,7 @@
   const JOB_TABS = [
     ['overview', 'Overview'],
     ['all_candidates', 'All Candidates'],
+    ['applicants', 'Applicants'],
     ['shortlisted', 'Shortlisted'],
     ['ranked', 'Ranked'],
     ['outreach', 'Outreach'],
@@ -202,6 +210,16 @@
 
   function getJobCandidates(jobId) {
     return state.jobCandidates[jobId] || [];
+  }
+
+  function jobSupportsInbound(job) {
+    return ['inbound', 'both'].includes(String(job?.job_mode || 'outbound'));
+  }
+
+  function currentCreateTeamMembers() {
+    return state.createJobTeamMembers?.length
+      ? state.createJobTeamMembers
+      : [{ name: '', email: '', telegram_chat_id: '', notify_on_shortlist: true, notify_on_interview_scheduled: true }];
   }
 
   function isShortlistedCandidate(candidate) {
@@ -389,18 +407,25 @@
       return;
     }
 
-    const [job, candidates, activity, approvals] = await Promise.all([
+    const [job, candidates, activity, approvals, applicants, team] = await Promise.all([
       request(`/api/jobs/${jobId}`),
       request(`/api/jobs/${jobId}/candidates?limit=500`),
       request(`/api/jobs/${jobId}/activity`),
       request(`/api/jobs/${jobId}/approval-queue`),
+      request(`/api/jobs/${jobId}/applicants`),
+      request(`/api/jobs/${jobId}/team`),
     ]);
 
     state.selectedJobDetail = job;
     state.selectedJobCandidates = candidates || [];
+    state.selectedJobApplicants = applicants || [];
     state.selectedJobActivity = activity || [];
     state.selectedJobApprovals = (approvals || []).filter((item) => item.channel !== 'connection_request');
+    state.selectedJobTeamMembers = team || [];
     state.jobCandidates[jobId] = candidates || [];
+    if (state.selectedJobTab === 'applicants' && !jobSupportsInbound(job)) {
+      state.selectedJobTab = 'overview';
+    }
     render();
   }
 
@@ -483,9 +508,26 @@
 
   function renderCreateJobForm() {
     if (!state.showCreateJobForm) return '';
+    const teamRows = currentCreateTeamMembers().map((member, index) => (
+      '<div class="surface form-grid form-span-2 applicant-team-row">' +
+        `<label><span>Name</span><input class="input" data-action="update-team-member" data-id="${index}" data-extra="name" value="${esc(member.name || '')}" placeholder="Hiring Manager" /></label>` +
+        `<label><span>Email</span><input class="input" data-action="update-team-member" data-id="${index}" data-extra="email" value="${esc(member.email || '')}" placeholder="manager@client.com" /></label>` +
+        `<label><span>Telegram Chat ID</span><input class="input" data-action="update-team-member" data-id="${index}" data-extra="telegram_chat_id" value="${esc(member.telegram_chat_id || '')}" placeholder="123456789" /></label>` +
+        `<label><span>Role</span><select class="select" data-action="update-team-member" data-id="${index}" data-extra="role"><option value="recruiter"${member.role === 'recruiter' ? ' selected' : ''}>Recruiter</option><option value="hiring_manager"${member.role === 'hiring_manager' ? ' selected' : ''}>Hiring Manager</option><option value="admin"${member.role === 'admin' ? ' selected' : ''}>Admin</option></select></label>` +
+        `<label class="checkbox-row"><input type="checkbox" data-action="update-team-member" data-id="${index}" data-extra="notify_on_shortlist"${member.notify_on_shortlist !== false ? ' checked' : ''} /><span>Notify on shortlist</span></label>` +
+        `<label class="checkbox-row"><input type="checkbox" data-action="update-team-member" data-id="${index}" data-extra="notify_on_interview_scheduled"${member.notify_on_interview_scheduled !== false ? ' checked' : ''} /><span>Notify on interview scheduled</span></label>` +
+        `<div class="button-row form-span-2"><button class="btn btn-secondary btn-sm" type="button" data-action="remove-team-member" data-id="${index}">Remove</button></div>` +
+      '</div>'
+    )).join('');
+
     return (
       '<form id="job-create-form" class="surface form-grid create-job-form">' +
         '<div class="form-span-2"><div class="label-caps">Launch Job</div><h2 class="section-title">Create New Pipeline</h2><div class="job-detail-sub">Add the brief here, then Raxion can source and sequence from this pipeline immediately.</div></div>' +
+        '<div class="form-span-2"><span>Job Mode</span><div class="tab-row">' +
+          `<button class="tab-button${state.createJobMode === 'outbound' ? ' active' : ''}" type="button" data-action="set-create-job-mode" data-id="outbound">Outbound Only</button>` +
+          `<button class="tab-button${state.createJobMode === 'inbound' ? ' active' : ''}" type="button" data-action="set-create-job-mode" data-id="inbound">Inbound Only</button>` +
+          `<button class="tab-button${state.createJobMode === 'both' ? ' active' : ''}" type="button" data-action="set-create-job-mode" data-id="both">Both</button>` +
+        '</div></div>' +
         '<label><span>Job Title</span><input class="input" name="job_title" required placeholder="Senior Recruitment Consultant" /></label>' +
         '<label><span>Client</span><input class="input" name="client_name" required placeholder="LIBDR" /></label>' +
         '<label><span>Location</span><input class="input" name="location" placeholder="United States" /></label>' +
@@ -496,7 +538,29 @@
         '<label><span>Send Window Start</span><input class="input" name="send_from" placeholder="09:00" /></label>' +
         '<label><span>Send Window End</span><input class="input" name="send_until" placeholder="17:00" /></label>' +
         '<label><span>LinkedIn Daily Limit</span><input class="input" name="linkedin_daily_limit" type="number" min="1" placeholder="28" /></label>' +
+        (state.createJobMode !== 'outbound'
+          ? (
+            '<div class="form-span-2 surface form-grid">' +
+              '<div class="form-span-2"><div class="label-caps">Inbound Setup</div><h3 class="section-title small">LinkedIn Job Posting</h3></div>' +
+              '<div class="form-span-2 tab-row">' +
+                `<button class="tab-button${state.createPostingMode === 'existing' ? ' active' : ''}" type="button" data-action="set-posting-mode" data-id="existing">Use Existing Posting</button>` +
+                `<button class="tab-button${state.createPostingMode === 'create' ? ' active' : ''}" type="button" data-action="set-posting-mode" data-id="create">Create New Posting</button>` +
+              '</div>' +
+              (state.createPostingMode === 'existing'
+                ? '<label class="form-span-2"><span>LinkedIn Job Posting ID</span><input class="input" name="linkedin_job_posting_id" placeholder="LinkedIn posting ID" /></label>'
+                : '<label class="checkbox-row form-span-2"><input type="checkbox" name="create_linkedin_posting" checked /><span>Create new posting when job launches</span></label>') +
+              '<label class="form-span-2"><span>Zoho Job Opening ID</span><input class="input" name="zoho_job_opening_id" placeholder="Optional existing Zoho Job Opening ID" /></label>' +
+            '</div>'
+          )
+          : '') +
         '<label class="form-span-2"><span>Role Notes</span><textarea class="input textarea" name="notes" placeholder="What makes a good candidate, market notes, messaging context, client nuances."></textarea></label>' +
+        (state.createJobMode !== 'outbound'
+          ? (
+            '<div class="form-span-2"><div class="section-head"><div><div class="label-caps">Team Members</div><h3 class="section-title small">Shortlist and Interview Notifications</h3></div><button class="btn btn-secondary btn-sm" type="button" data-action="add-team-member">Add Team Member</button></div>' +
+            teamRows +
+            '</div>'
+          )
+          : '') +
         '<div class="form-span-2 button-row"><button class="btn btn-primary" type="submit">Create Job</button><button class="btn btn-secondary" type="button" data-action="toggle-create-job" data-id="off">Cancel</button></div>' +
       '</form>'
     );
@@ -540,11 +604,29 @@
     );
   }
 
+  function renderApplicantTable(applicants) {
+    const rows = (applicants || []).map((candidate) => (
+      '<tr>' +
+        `<td><div class="candidate-primary"><button class="text-link candidate-name" data-action="open-candidate" data-id="${esc(candidate.id)}">${esc(candidate.name || 'Unknown')}</button><div class="candidate-sub">${esc(candidate.current_title || 'No title')}</div></div></td>` +
+        `<td>${esc(formatDateTime(candidate.applied_at))}</td>` +
+        `<td>${scorePill(candidate.fit_score)}</td>` +
+        `<td><span class="stage-chip ${gradeClass(candidate.fit_grade)}">${esc(candidate.fit_grade || 'UNRATED')}</span></td>` +
+        `<td>${candidate.resume_text ? '<span class="stage-chip stage-enriched">Parsed</span>' : '<span class="stage-chip stage-sourced">None</span>'}</td>` +
+        `<td>${candidate.reply_sent ? '<span class="stage-chip stage-qualified">Sent</span>' : state.selectedJobApprovals.some((item) => item.candidate_id === candidate.id && item.channel === 'email') ? '<span class="stage-chip stage-enriched">Pending</span>' : '<span class="stage-chip stage-sourced">Not queued</span>'}</td>` +
+        `<td>${candidate.interview_scheduled ? '<span class="stage-chip stage-qualified">Scheduled</span>' : '<span class="stage-chip stage-sourced">Not scheduled</span>'}</td>` +
+        `<td><div class="button-row"><button class="btn btn-secondary btn-sm" data-action="open-candidate" data-id="${esc(candidate.id)}">View</button><button class="btn btn-secondary btn-sm" data-action="queue-applicant-reply" data-id="${esc(candidate.id)}">Reply</button><button class="btn btn-secondary btn-sm" data-action="schedule-interview" data-id="${esc(candidate.id)}">Schedule Interview</button><button class="btn btn-danger btn-sm" data-action="archive-candidate" data-id="${esc(candidate.id)}">Archive</button></div></td>` +
+      '</tr>'
+    )).join('') || '<tr><td colspan="8">No applicants yet.</td></tr>';
+
+    return '<div class="table-shell"><table><thead><tr><th>Name</th><th>Applied</th><th>Score</th><th>Grade</th><th>CV</th><th>Reply</th><th>Interview</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+  }
+
   function renderJobDetail() {
     const job = state.selectedJobDetail;
     if (!job) return '<div class="empty-state">Select a job to inspect the pipeline.</div>';
 
     const all = state.selectedJobCandidates || [];
+    const applicants = state.selectedJobApplicants || [];
     const shortlisted = all.filter(isShortlistedCandidate);
     const ranked = [...all].sort((a, b) => Number(b.fit_score || 0) - Number(a.fit_score || 0));
     const outreach = all.filter((candidate) => ['invite_sent', 'invite_accepted', 'dm_sent', 'email_sent'].includes(candidate.pipeline_stage));
@@ -553,6 +635,7 @@
     const templates = parseTemplates(job.outreach_templates);
     const metrics = job.metrics || {};
     const counts = candidateStageCounts(all);
+    const visibleTabs = JOB_TABS.filter(([key]) => key !== 'applicants' || jobSupportsInbound(job));
 
     let content = '';
     if (state.selectedJobTab === 'overview') {
@@ -599,6 +682,24 @@
           '</div>' +
         '</section>'
       );
+    } else if (state.selectedJobTab === 'applicants') {
+      const shortlistedApplicants = applicants.filter((candidate) => ['HOT', 'WARM'].includes(candidate.fit_grade));
+      const repliedApplicants = applicants.filter((candidate) => candidate.reply_sent || state.selectedJobApprovals.some((item) => item.candidate_id === candidate.id && item.channel === 'email'));
+      const interviewsScheduled = applicants.filter((candidate) => candidate.interview_scheduled);
+      content = (
+        '<section class="view-section">' +
+          '<div class="metric-strip metric-strip-job">' +
+            `<div class="metric-card strip-card"><div class="metric-number">${applicants.length}</div><div class="metric-caption">Total Applied</div></div>` +
+            `<div class="metric-card strip-card"><div class="metric-number">${shortlistedApplicants.length}</div><div class="metric-caption">Shortlisted</div></div>` +
+            `<div class="metric-card strip-card"><div class="metric-number">${repliedApplicants.length}</div><div class="metric-caption">Replied</div></div>` +
+            `<div class="metric-card strip-card"><div class="metric-number">${interviewsScheduled.length}</div><div class="metric-caption">Interviews Scheduled</div></div>` +
+          '</div>' +
+          '<div class="surface"><div class="section-head"><div><div class="label-caps">Applicants</div><h2 class="section-title">Inbound Applicant Pipeline</h2><div class="job-detail-sub">Scored applicants are ranked here separately from sourced outreach candidates.</div></div><div class="button-row"><button class="btn btn-secondary btn-sm" data-action="fetch-applicants" data-id="' + esc(job.id) + '">Fetch Applicants</button><button class="btn btn-secondary btn-sm" data-action="create-linkedin-posting" data-id="' + esc(job.id) + '">Create Posting</button></div></div>' + renderApplicantTable(applicants) + '</div>' +
+          '<div class="surface"><div class="section-head"><div><div class="label-caps">Team</div><h2 class="section-title">Notification Recipients</h2></div></div><div class="thread-list">' +
+            (state.selectedJobTeamMembers || []).map((member) => `<div class="thread-card"><div class="candidate-name">${esc(member.name)}</div><div class="candidate-sub">${esc(member.role || 'recruiter')} · ${esc(member.email || 'No email')} · ${esc(member.telegram_chat_id || 'No Telegram')}</div></div>`).join('') +
+          '</div></div>' +
+        '</section>'
+      );
     } else if (state.selectedJobTab === 'shortlisted') {
       content = renderCandidateTable(shortlisted);
     } else if (state.selectedJobTab === 'ranked') {
@@ -639,9 +740,9 @@
       '<section class="view-section" id="job-detail-anchor">' +
         '<div class="job-detail-header surface">' +
           '<div><div class="label-caps">Job Detail</div><h2 class="section-title">' + esc(job.job_title || job.name) + '</h2><div class="job-detail-sub">' + esc(job.client_name || 'Unknown client') + ' · ' + esc(job.location || 'No location') + '</div></div>' +
-          '<div class="button-row"><button class="btn btn-primary btn-sm" data-action="source-now" data-id="' + esc(job.id) + '">Source Now</button><button class="btn btn-secondary btn-sm" data-action="close-job" data-id="' + esc(job.id) + '">Close</button></div>' +
+          '<div class="button-row"><button class="btn btn-primary btn-sm" data-action="source-now" data-id="' + esc(job.id) + '">Source Now</button>' + (jobSupportsInbound(job) ? '<button class="btn btn-secondary btn-sm" data-action="fetch-applicants" data-id="' + esc(job.id) + '">Fetch Applicants</button>' : '') + '<button class="btn btn-secondary btn-sm" data-action="close-job" data-id="' + esc(job.id) + '">Close</button></div>' +
         '</div>' +
-        '<div class="tab-row">' + JOB_TABS.map(([key, label]) => `<button class="tab-button${state.selectedJobTab === key ? ' active' : ''}" data-action="set-job-tab" data-id="${esc(key)}">${esc(label)}</button>`).join('') + '</div>' +
+        '<div class="tab-row">' + visibleTabs.map(([key, label]) => `<button class="tab-button${state.selectedJobTab === key ? ' active' : ''}" data-action="set-job-tab" data-id="${esc(key)}">${esc(label)}</button>`).join('') + '</div>' +
         content +
       '</section>'
     );
@@ -867,6 +968,7 @@
         || String(candidate.latest_fit_grade || '') !== String(candidate.fit_grade || '')
         || String(candidate.latest_fit_rationale || '') !== String(candidate.fit_rationale || '')
       );
+    const isApplicant = candidate.candidate_type === 'applicant';
     return (
       '<div class="drawer-backdrop" data-action="close-candidate"></div>' +
       '<aside class="drawer">' +
@@ -879,11 +981,14 @@
           (hasLatestEvaluation
             ? '<div class="panel-block"><div class="panel-label">Latest Re-evaluation</div><p><strong>' + esc(`${candidate.latest_fit_score}/100 ${candidate.latest_fit_grade || ''}`.trim()) + '</strong></p><p>' + esc(candidate.latest_fit_rationale || 'No latest rationale.') + '</p></div>'
             : '') +
+          (isApplicant ? '<div class="panel-block"><div class="panel-grid"><div><span class="panel-label">Applied</span><strong>' + esc(formatDateTime(candidate.applied_at)) + '</strong></div><div><span class="panel-label">Application Rating</span><strong>' + esc(candidate.application_rating || 'UNRATED') + '</strong></div><div><span class="panel-label">Reply Status</span><strong>' + esc(candidate.reply_sent ? 'Sent' : 'Pending / Not Sent') + '</strong></div><div><span class="panel-label">Interview</span><strong>' + esc(candidate.interview_scheduled ? formatDateTime(candidate.interview_at) : 'Not scheduled') + '</strong></div></div></div>' : '') +
           '<div class="panel-block"><div class="panel-label">Skills</div><div class="tag-row">' + (String(candidate.tech_skills || '').split(',').map((tag) => tag.trim()).filter(Boolean).map((tag) => `<span class="tag">${esc(tag)}</span>`).join('') || '<span class="muted-inline">No skills captured</span>') + '</div></div>' +
           '<div class="panel-block"><div class="panel-label">Past employers</div><p>' + esc(candidate.past_employers || 'No employer history captured.') + '</p></div>' +
+          (isApplicant ? '<div class="panel-block"><div class="panel-label">CV Summary</div><p>' + esc(candidate.resume_text || 'No parsed CV text available.') + '</p></div>' : '') +
+          (isApplicant ? '<div class="panel-block"><div class="panel-label">Education</div><p>' + esc(candidate.education || 'No education captured.') + '</p></div>' : '') +
           '<div class="panel-block"><div class="panel-label">Stage change</div><div class="button-row"><select id="candidate-stage-select" class="select">' + stageOptions + '</select><button class="btn btn-primary btn-sm" data-action="save-candidate-stage" data-id="' + esc(candidate.id) + '">Save Stage</button></div></div>' +
           '<div class="panel-block"><div class="panel-label">Conversation history</div>' + (candidate.conversation_history || []).map((message) => `<div class="conversation-card ${message.direction === 'inbound' ? 'inbound' : 'outbound'}"><div class="conversation-meta">${esc(message.channel || 'message')} · ${esc(formatTime(message.sent_at))}</div><div>${esc(message.message_text || '')}</div></div>`).join('') + ((candidate.conversation_history || []).length ? '' : '<div class="muted-inline">No conversation history.</div>') + '</div>' +
-          '<div class="button-row"><button class="btn btn-secondary btn-sm" data-action="sync-ats" data-id="' + esc(candidate.id) + '">Sync to ATS</button><button class="btn btn-secondary btn-sm" data-action="archive-candidate" data-id="' + esc(candidate.id) + '">Archive</button><button class="btn btn-danger btn-sm" data-action="end-chat" data-id="' + esc(candidate.id) + '">End Chat</button></div>' +
+          '<div class="button-row"><button class="btn btn-secondary btn-sm" data-action="sync-ats" data-id="' + esc(candidate.id) + '">Sync to ATS</button>' + (isApplicant ? '<button class="btn btn-secondary btn-sm" data-action="queue-applicant-reply" data-id="' + esc(candidate.id) + '">Send Reply Email</button><button class="btn btn-secondary btn-sm" data-action="schedule-interview" data-id="' + esc(candidate.id) + '">Schedule Interview</button>' : '') + '<button class="btn btn-secondary btn-sm" data-action="archive-candidate" data-id="' + esc(candidate.id) + '">Archive</button><button class="btn btn-danger btn-sm" data-action="end-chat" data-id="' + esc(candidate.id) + '">End Chat</button></div>' +
         '</div>' +
       '</aside>'
     );
@@ -942,6 +1047,9 @@
 
     if (action === 'toggle-create-job') {
       state.showCreateJobForm = id !== 'off';
+      if (state.showCreateJobForm && !state.createJobTeamMembers?.length) {
+        state.createJobTeamMembers = [{ name: '', email: '', telegram_chat_id: '', notify_on_shortlist: true, notify_on_interview_scheduled: true }];
+      }
       state.view = 'jobs';
       window.location.hash = 'jobs';
       render();
@@ -962,6 +1070,45 @@
       return;
     }
 
+    if (action === 'set-create-job-mode') {
+      state.createJobMode = id;
+      if (id === 'outbound') state.createPostingMode = 'existing';
+      render();
+      return;
+    }
+
+    if (action === 'set-posting-mode') {
+      state.createPostingMode = id;
+      render();
+      return;
+    }
+
+    if (action === 'add-team-member') {
+      state.createJobTeamMembers = [...currentCreateTeamMembers(), { name: '', email: '', telegram_chat_id: '', role: 'recruiter', notify_on_shortlist: true, notify_on_interview_scheduled: true }];
+      render();
+      return;
+    }
+
+    if (action === 'remove-team-member') {
+      state.createJobTeamMembers = currentCreateTeamMembers().filter((_, index) => String(index) !== String(id));
+      if (!state.createJobTeamMembers.length) {
+        state.createJobTeamMembers = [{ name: '', email: '', telegram_chat_id: '', role: 'recruiter', notify_on_shortlist: true, notify_on_interview_scheduled: true }];
+      }
+      render();
+      return;
+    }
+
+    if (action === 'update-team-member') {
+      state.createJobTeamMembers = currentCreateTeamMembers().map((member, index) => {
+        if (String(index) !== String(id)) return member;
+        return {
+          ...member,
+          [extra]: sourceEl.type === 'checkbox' ? sourceEl.checked : sourceEl.value,
+        };
+      });
+      return;
+    }
+
     if (action === 'set-activity-group') {
       if (id === 'overview') state.selectedActivityGroup = sourceEl.value;
       if (id === 'global') state.selectedGlobalActivityGroup = sourceEl.value;
@@ -978,6 +1125,22 @@
     if (action === 'source-now') {
       await request(`/api/jobs/${id}/source-now`, { method: 'POST' });
       showToast('Sourcing triggered.');
+      await loadCoreData();
+      await loadSelectedJob(id);
+      return;
+    }
+
+    if (action === 'fetch-applicants') {
+      await request(`/api/jobs/${id}/fetch-applicants`, { method: 'POST' });
+      showToast('Applicant fetch triggered.');
+      await loadCoreData();
+      await loadSelectedJob(id);
+      return;
+    }
+
+    if (action === 'create-linkedin-posting') {
+      await request(`/api/jobs/${id}/create-linkedin-posting`, { method: 'POST' });
+      showToast('LinkedIn posting created.');
       await loadCoreData();
       await loadSelectedJob(id);
       return;
@@ -1060,6 +1223,34 @@
     if (action === 'sync-ats') {
       await request(`/api/candidates/${id}/sync-ats`, { method: 'POST' });
       showToast('ATS sync triggered.');
+      return;
+    }
+
+    if (action === 'queue-applicant-reply') {
+      const candidate = state.selectedJobApplicants.find((item) => item.id === id) || state.candidatePanelDetail;
+      if (!candidate) return;
+      await request(`/api/jobs/${candidate.job_id}/candidates/${candidate.id}/draft-applicant-reply`, { method: 'POST' });
+      showToast('Applicant reply drafting triggered.');
+      await loadCoreData();
+      await loadSelectedJob(candidate.job_id);
+      if (state.candidatePanelId === id) await openCandidatePanel(id);
+      return;
+    }
+
+    if (action === 'schedule-interview') {
+      const candidate = state.selectedJobApplicants.find((item) => item.id === id) || state.candidatePanelDetail;
+      if (!candidate) return;
+      const proposedTime = window.prompt('Interview date/time (ISO or local format). Leave blank for +2 days default.', candidate.interview_at || '');
+      const notes = window.prompt('Optional interview notes', '') || '';
+      await request(`/api/jobs/${candidate.job_id}/candidates/${candidate.id}/schedule-interview`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ proposed_time: proposedTime || null, notes }),
+      });
+      showToast('Interview scheduled.');
+      await loadCoreData();
+      await loadSelectedJob(candidate.job_id);
+      if (state.candidatePanelId === id) await openCandidatePanel(id);
       return;
     }
 
@@ -1186,6 +1377,13 @@
       const payload = Object.fromEntries(new FormData(event.target).entries());
       payload.name = payload.job_title;
       payload.status = 'ACTIVE';
+      payload.job_mode = state.createJobMode;
+      payload.team_members = state.createJobMode === 'outbound'
+        ? []
+        : currentCreateTeamMembers().filter((member) => String(member.name || '').trim());
+      if (state.createPostingMode === 'create') {
+        payload.create_linkedin_posting = true;
+      }
       if (payload.salary_min) payload.salary_min = Number(payload.salary_min);
       if (payload.salary_max) payload.salary_max = Number(payload.salary_max);
       const result = await request('/api/jobs/create', {
@@ -1197,6 +1395,9 @@
       await loadSelectedJob(result.job_id);
       state.view = 'jobs';
       state.showCreateJobForm = false;
+      state.createJobMode = 'outbound';
+      state.createPostingMode = 'existing';
+      state.createJobTeamMembers = [{ name: '', email: '', telegram_chat_id: '', role: 'recruiter', notify_on_shortlist: true, notify_on_interview_scheduled: true }];
       render();
       scrollToId('job-detail-anchor');
       return;

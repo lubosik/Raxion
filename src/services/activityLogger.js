@@ -2,13 +2,31 @@ import { EventEmitter } from 'node:events';
 import supabase from '../db/supabase.js';
 
 export const activityStream = new EventEmitter();
+const jobTitleCache = new Map();
+
+async function getJobTitle(jobId) {
+  if (!jobId) return null;
+  if (jobTitleCache.has(jobId)) return jobTitleCache.get(jobId);
+  const { data } = await supabase.from('jobs').select('job_title,title,name').eq('id', jobId).maybeSingle();
+  const title = data?.job_title || data?.title || data?.name || null;
+  jobTitleCache.set(jobId, title);
+  return title;
+}
+
+async function withJobTitlePrefix(jobId, summary) {
+  if (!jobId || !summary) return summary;
+  const jobTitle = await getJobTitle(jobId);
+  if (!jobTitle) return summary;
+  if (String(summary).startsWith(`${jobTitle}: `)) return summary;
+  return `${jobTitle}: ${summary}`;
+}
 
 export async function logActivity(jobId, candidateId, eventType, summary, detail = {}) {
   const payload = {
     job_id: jobId || null,
     candidate_id: candidateId || null,
     event_type: eventType,
-    summary,
+    summary: await withJobTitlePrefix(jobId, summary),
     detail,
   };
 

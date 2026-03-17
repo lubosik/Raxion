@@ -1,6 +1,6 @@
 import supabase from '../db/supabase.js';
 import { createLinkedInJobPosting, publishLinkedInJobPosting, closeLinkedInJobPosting, getSearchParameters } from '../integrations/unipile.js';
-import { sourceFromLinkedInJobPosting } from './candidateSourcing.js';
+import { fetchAndProcessApplicants } from './inboundApplicantService.js';
 import { logActivity } from './activityLogger.js';
 
 function mapWorkplace(remotePolicy) {
@@ -43,5 +43,5 @@ export async function closeLinkedInJob(job) {
 }
 
 export async function ingestJobApplicants(job) {
-  return sourceFromLinkedInJobPosting(job);
+  return fetchAndProcessApplicants(job);
 }

@@ -30,6 +30,7 @@ export function normalizeJobRecord(job) {
     seniority_level: job.seniority_level || job.seniority || null,
     tech_stack_must: job.tech_stack_must || job.must_have_stack || null,
     full_job_description: job.full_job_description || job.raw_brief || job.candidate_profile || null,
+    job_mode: job.job_mode || 'outbound',
     paused,
   };
 }
@@ -59,6 +60,11 @@ export async function prepareJobPayload(input) {
     'status',
     'linkedin_daily_limit',
     'linkedin_job_posting_id',
+    'linkedin_project_id',
+    'last_applicant_fetch_at',
+    'applicant_fetch_cursor',
+    'zoho_job_opening_id',
+    'job_mode',
     'calendly_link',
     'notify_email',
     'send_from',
@@ -96,6 +102,11 @@ export async function prepareJobPayload(input) {
     status: input.status,
     linkedin_daily_limit: input.linkedin_daily_limit,
     linkedin_job_posting_id: input.linkedin_job_posting_id,
+    linkedin_project_id: input.linkedin_project_id,
+    last_applicant_fetch_at: input.last_applicant_fetch_at,
+    applicant_fetch_cursor: input.applicant_fetch_cursor,
+    zoho_job_opening_id: input.zoho_job_opening_id,
+    job_mode: input.job_mode,
     calendly_link: input.calendly_link,
     notify_email: input.notify_email,
     send_from: input.send_from || input.send_window_start,
@@ -122,6 +133,7 @@ export function normalizeApprovalRecord(approval) {
     message_text: approval.message_text || approval.body || approval.edited_body || '',
     stage: approval.stage || approval.message_type || null,
     telegram_message_id: approval.telegram_message_id || (approval.telegram_msg_id != null ? String(approval.telegram_msg_id) : null),
+    subject: approval.subject || null,
   };
 }
 
@@ -180,6 +192,18 @@ export function normalizeConversationRecord(conversation) {
     ...conversation,
     message_text: conversation.message_text || conversation.content || '',
     unipile_message_id: conversation.unipile_message_id || conversation.provider_id || null,
+  };
+}
+
+export function normalizeCandidateRecord(candidate) {
+  if (!candidate) return candidate;
+  return {
+    ...candidate,
+    candidate_type: candidate.candidate_type || 'sourced',
+    application_rating: candidate.application_rating || 'UNRATED',
+    reply_sent: Boolean(candidate.reply_sent),
+    team_pinged: Boolean(candidate.team_pinged),
+    interview_scheduled: Boolean(candidate.interview_scheduled),
   };
 }
 

@@ -1033,6 +1033,27 @@ tbody tr:last-child td {
   grid-column: 1 / -1;
 }
 
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  color: var(--text);
+}
+
+.checkbox-row input {
+  width: 16px;
+  height: 16px;
+}
+
+.applicant-team-row {
+  margin-top: 12px;
+  padding: 18px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: var(--panel-alt);
+}
+
 .tag {
   padding: 6px 10px;
   background: var(--panel-alt);

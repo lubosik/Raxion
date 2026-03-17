@@ -331,11 +331,33 @@ export async function getJobApplicants(linkedinJobId, filters = {}) {
   return result?.items || result?.applicants || result || [];
 }
 
+export async function getJobApplicantsPage(linkedinJobId, filters = {}) {
+  const linkedinAccountId = getLinkedinAccountId();
+  return request(`/linkedin/jobs/${encodeURIComponent(linkedinJobId)}/applicants`, {
+    query: { account_id: linkedinAccountId, ...filters },
+  });
+}
+
 export async function downloadApplicantResume(applicantId) {
   const linkedinAccountId = getLinkedinAccountId();
   return request(`/linkedin/jobs/applicants/${encodeURIComponent(applicantId)}/resume`, {
     query: { account_id: linkedinAccountId },
     returnBuffer: true,
+  });
+}
+
+export async function addApplicantToHiringProject(providerId, hiringProjectId, stage = 'UNCONTACTED') {
+  if (!providerId || !hiringProjectId) return null;
+  const linkedinAccountId = getLinkedinAccountId();
+  return request(`/linkedin/user/${encodeURIComponent(providerId)}`, {
+    method: 'POST',
+    body: {
+      account_id: linkedinAccountId,
+      api: 'recruiter',
+      action: 'addCandidateToPipeline',
+      hiring_project_id: hiringProjectId,
+      stage,
+    },
   });
 }
 

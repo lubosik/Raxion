@@ -22,10 +22,23 @@ import { getSetting, setSetting } from '../services/settings.js';
 import { markConversationEnded } from '../services/conversationState.js';
 import {
   normalizeApprovalRecord,
+  normalizeCandidateRecord,
   normalizeConversationRecord,
   normalizeJobRecord,
   prepareJobPayload,
 } from '../services/dbCompat.js';
+import {
+  addJobTeamMember,
+  createLinkedInJobPostingForJob,
+  draftApplicantReply,
+  fetchAndProcessApplicants,
+  handleInboundJobLaunch,
+  listApplicantsForJob,
+  listJobTeamMembers,
+  removeJobTeamMember,
+  replaceJobTeamMembers,
+  scheduleInterviewInZoho,
+} from '../services/inboundApplicantService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -316,7 +329,15 @@ export function createDashboardServer() {
     const { data: job, error } = await supabase.from('jobs').insert(await prepareJobPayload(payload)).select('*').single();
     if (error) return res.status(400).json({ error: error.message });
     const normalized = normalizeJobRecord(job);
-    sourceCandidatesForJob(normalized).catch(() => null);
+    if (Array.isArray(req.body.team_members)) {
+      await replaceJobTeamMembers(normalized.id, req.body.team_members);
+    }
+    handleInboundJobLaunch({ ...normalized, ...req.body }).catch((launchError) => {
+      console.error('[dashboard] inbound launch failed', { jobId: normalized.id, error: launchError.message });
+    });
+    if (['outbound', 'both'].includes(req.body.job_mode || 'outbound')) {
+      sourceCandidatesForJob(normalized).catch(() => null);
+    }
     res.json({ job_id: normalized.id });
   });
 
@@ -327,11 +348,14 @@ export function createDashboardServer() {
   });
 
   app.get('/api/jobs/:id', async (req, res) => {
-    const { data: job } = await supabase.from('jobs').select('*').eq('id', req.params.id).single();
-    const { data: activity } = await supabase.from('activity_log').select('*').eq('job_id', req.params.id).order('created_at', { ascending: false }).limit(20);
-    const { data: assets } = await supabase.from('job_assets').select('*').eq('job_id', req.params.id).order('created_at', { ascending: false });
+    const [{ data: job }, { data: activity }, { data: assets }, teamMembers] = await Promise.all([
+      supabase.from('jobs').select('*').eq('id', req.params.id).single(),
+      supabase.from('activity_log').select('*').eq('job_id', req.params.id).order('created_at', { ascending: false }).limit(20),
+      supabase.from('job_assets').select('*').eq('job_id', req.params.id).order('created_at', { ascending: false }),
+      listJobTeamMembers(req.params.id),
+    ]);
     const normalized = normalizeJobRecord(job);
-    res.json({ ...normalized, metrics: await fetchJobMetrics(normalized.id), recent_activity: activity || [], assets: assets || [] });
+    res.json({ ...normalized, metrics: await fetchJobMetrics(normalized.id), recent_activity: activity || [], assets: assets || [], team_members: teamMembers || [] });
   });
 
   app.patch('/api/jobs/:id', async (req, res) => {
@@ -352,6 +376,11 @@ export function createDashboardServer() {
     const { data: job } = await supabase.from('jobs').select('*').eq('id', req.params.id).single();
     res.json(await postJobToLinkedIn(normalizeJobRecord(job)));
   });
+  app.post('/api/jobs/:id/create-linkedin-posting', async (req, res) => {
+    const { data: job } = await supabase.from('jobs').select('*').eq('id', req.params.id).single();
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    res.json(await createLinkedInJobPostingForJob(normalizeJobRecord(job)));
+  });
   app.post('/api/jobs/:id/source-now', async (req, res) => {
     const { data: job } = await supabase.from('jobs').select('*').eq('id', req.params.id).single();
     if (!job) return res.status(404).json({ error: 'Job not found' });
@@ -364,6 +393,16 @@ export function createDashboardServer() {
   app.post('/api/jobs/:id/ingest-applicants', async (req, res) => {
     const { data: job } = await supabase.from('jobs').select('*').eq('id', req.params.id).single();
     res.json(await ingestJobApplicants(job));
+  });
+  app.post('/api/jobs/:id/fetch-applicants', async (req, res) => {
+    const { data: job } = await supabase.from('jobs').select('*').eq('id', req.params.id).single();
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    res.json(await fetchAndProcessApplicants(normalizeJobRecord(job)));
+  });
+  app.post('/api/jobs/:id/close-linkedin-posting', async (req, res) => {
+    const { data: job } = await supabase.from('jobs').select('*').eq('id', req.params.id).single();
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    res.json(await closeLinkedInJob(normalizeJobRecord(job)));
   });
   app.get('/api/jobs/:id/assets', async (req, res) => {
     const { data, error } = await supabase.from('job_assets').select('*').eq('job_id', req.params.id).order('created_at', { ascending: false });
@@ -404,7 +443,20 @@ export function createDashboardServer() {
     if (req.query.stage) query = query.eq('pipeline_stage', req.query.stage);
     if (req.query.grade) query = query.eq('fit_grade', req.query.grade);
     const { data } = await query.range(Number(req.query.offset || 0), Number(req.query.offset || 0) + Number(req.query.limit || 49));
-    res.json(data || []);
+    res.json((data || []).map(normalizeCandidateRecord));
+  });
+  app.get('/api/jobs/:id/applicants', async (req, res) => {
+    res.json((await listApplicantsForJob(req.params.id)).map(normalizeCandidateRecord));
+  });
+  app.get('/api/jobs/:id/team', async (req, res) => {
+    res.json(await listJobTeamMembers(req.params.id));
+  });
+  app.post('/api/jobs/:id/team', async (req, res) => {
+    res.json(await addJobTeamMember(req.params.id, req.body || {}));
+  });
+  app.delete('/api/jobs/:id/team/:memberId', async (req, res) => {
+    await removeJobTeamMember(req.params.id, req.params.memberId);
+    res.json({ success: true });
   });
 
   app.get('/api/jobs/:id/activity', async (req, res) => {
@@ -431,7 +483,7 @@ export function createDashboardServer() {
       supabase.from('activity_log').select('*').eq('candidate_id', req.params.id).order('created_at', { ascending: false }),
       supabase.from('approval_queue').select('*').eq('candidate_id', req.params.id).in('status', ['pending', 'edited', 'approved']).order('created_at', { ascending: false }),
     ]);
-    res.json({ ...candidate, conversation_history: (conversations || []).map(normalizeConversationRecord), activity_log: activity || [], approvals: (approvals || []).map(normalizeApprovalRecord) });
+    res.json({ ...normalizeCandidateRecord(candidate), conversation_history: (conversations || []).map(normalizeConversationRecord), activity_log: activity || [], approvals: (approvals || []).map(normalizeApprovalRecord) });
   });
 
   app.post('/api/candidates/:id/stage', async (req, res) => {
@@ -478,6 +530,26 @@ export function createDashboardServer() {
   app.post('/api/candidates/:id/sync-ats', async (req, res) => {
     const { data: candidate } = await supabase.from('candidates').select('*').eq('id', req.params.id).single();
     res.json(await syncCandidateToATS(candidate));
+  });
+  app.post('/api/jobs/:jobId/candidates/:candidateId/schedule-interview', async (req, res) => {
+    const [{ data: candidate }, { data: job }] = await Promise.all([
+      supabase.from('candidates').select('*').eq('id', req.params.candidateId).eq('job_id', req.params.jobId).single(),
+      supabase.from('jobs').select('*').eq('id', req.params.jobId).single(),
+    ]);
+    if (!candidate || !job) return res.status(404).json({ error: 'Candidate or job not found' });
+    const interviewId = await scheduleInterviewInZoho(candidate, normalizeJobRecord(job), req.body.proposed_time || null, req.body.notes || '');
+    if (!interviewId) return res.status(400).json({ error: 'Interview scheduling failed' });
+    res.json({ success: true, zoho_interview_id: interviewId });
+  });
+  app.post('/api/jobs/:jobId/candidates/:candidateId/draft-applicant-reply', async (req, res) => {
+    const [{ data: candidate }, { data: job }] = await Promise.all([
+      supabase.from('candidates').select('*').eq('id', req.params.candidateId).eq('job_id', req.params.jobId).single(),
+      supabase.from('jobs').select('*').eq('id', req.params.jobId).single(),
+    ]);
+    if (!candidate || !job) return res.status(404).json({ error: 'Candidate or job not found' });
+    const approval = await draftApplicantReply(candidate, normalizeJobRecord(job));
+    if (!approval) return res.status(400).json({ error: 'No applicant reply was queued' });
+    res.json(approval);
   });
 
   app.delete('/api/candidates/:id', async (req, res) => {

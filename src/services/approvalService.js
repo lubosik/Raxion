@@ -75,7 +75,7 @@ function approvalMessage(candidate, job, approval) {
   ].join('\n');
 }
 
-function approvalReplyMarkup(approvalId, status) {
+function approvalReplyMarkup(approvalId, status, candidateId = null) {
   if (!['pending', 'edited'].includes(status)) {
     return { inline_keyboard: [] };
   }
@@ -85,7 +85,9 @@ function approvalReplyMarkup(approvalId, status) {
       { text: 'Approve', callback_data: `approval:approve:${approvalId}` },
       { text: 'Edit', callback_data: `approval:edit:${approvalId}` },
       { text: 'Skip', callback_data: `approval:skip:${approvalId}` },
-    ]],
+    ], ...(candidateId ? [[
+      { text: 'End Chat', callback_data: `candidate:endchat:${candidateId}` },
+    ]] : [])],
   };
 }
 
@@ -100,7 +102,7 @@ async function syncApprovalTelegramCard(approval) {
     getRecruiterChatId(),
     normalizedApproval.telegram_message_id,
     approvalMessage(candidate, job, normalizedApproval),
-    { reply_markup: approvalReplyMarkup(normalizedApproval.id, normalizedApproval.status) },
+    { reply_markup: approvalReplyMarkup(normalizedApproval.id, normalizedApproval.status, candidate.id) },
   ).catch(() => null);
 }
 
@@ -109,7 +111,7 @@ async function deliverApprovalTelegramCard(approval, candidate, job) {
   const telegramResponse = await sendTelegramMessage(
     getRecruiterChatId(),
     approvalMessage(candidate, job, normalizedApproval),
-    { reply_markup: approvalReplyMarkup(normalizedApproval.id, normalizedApproval.status) },
+    { reply_markup: approvalReplyMarkup(normalizedApproval.id, normalizedApproval.status, candidate.id) },
   );
 
   if (telegramResponse?.result?.message_id) {
@@ -165,7 +167,12 @@ async function executeSend(approval, candidate) {
     if (!candidate.email) {
       throw new Error('Missing email address for email send');
     }
-    return sendEmail(candidate.email, candidate.name, `${candidate.current_title || 'Opportunity'} at ${candidate.current_company || 'Raxion'}`, normalizedApproval.message_text);
+    return sendEmail(
+      candidate.email,
+      candidate.name,
+      normalizedApproval.subject || `${candidate.current_title || 'Opportunity'} at ${candidate.current_company || 'Raxion'}`,
+      normalizedApproval.message_text,
+    );
   }
 
   throw new Error(`Unsupported channel ${normalizedApproval.channel}`);
@@ -187,7 +194,12 @@ async function applyStageAfterSend(approval, candidate, result) {
     updates.unipile_chat_id = result?.chat_id || candidate.unipile_chat_id;
     updates.follow_up_due_at = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
   } else if (normalizedApproval.channel === 'email') {
-    updates.pipeline_stage = normalizedApproval.stage || 'email_sent';
+    updates.pipeline_stage = normalizedApproval.stage === 'Applicant Reply Email'
+      ? candidate.pipeline_stage || 'Qualified'
+      : normalizedApproval.stage || 'email_sent';
+    if (normalizedApproval.stage === 'Applicant Reply Email') {
+      updates.reply_sent = true;
+    }
     updates.follow_up_due_at = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
   }
 
@@ -226,7 +238,7 @@ async function incrementDailyLimit(approval) {
   }
 }
 
-export async function queueApproval({ candidateId, jobId, messageText, channel, stage }) {
+export async function queueApproval({ candidateId, jobId, messageText, channel, stage, subject, messageType }) {
   if (channel === 'connection_request') {
     await logActivity(jobId, candidateId, 'MESSAGE_SKIPPED', 'Connection requests are sent autonomously and never queued for approval', {
       channel,
@@ -290,7 +302,8 @@ export async function queueApproval({ candidateId, jobId, messageText, channel, 
     message_text: finalMessageText,
     channel,
     stage,
-    message_type: channel,
+    subject,
+    message_type: messageType || channel,
   })).select('*').single();
   if (error || !approval) return null;
   const normalizedApproval = normalizeApprovalRecord(approval);
@@ -514,7 +527,7 @@ export async function editQueuedMessage(approvalId, messageText) {
       getRecruiterChatId(),
       normalizedApproval.telegram_message_id,
       approvalMessage(candidate, job, normalizedApproval),
-      { reply_markup: approvalReplyMarkup(normalizedApproval.id, normalizedApproval.status) },
+      { reply_markup: approvalReplyMarkup(normalizedApproval.id, normalizedApproval.status, candidate.id) },
     ).catch(() => null);
   }
 

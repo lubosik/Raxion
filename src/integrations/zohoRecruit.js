@@ -32,6 +32,8 @@ async function requestZoho(path, options = {}) {
   }
 }
 
+export { requestZoho };
+
 export async function getAccessToken() {
   if (cachedToken && Date.now() < cachedUntil) return cachedToken;
   const clientId = getRuntimeConfigValue('ZOHO_CLIENT_ID');
@@ -88,6 +90,33 @@ export async function createCandidate(candidate) {
         Source: 'Raxion AI',
       }],
     }),
+  });
+}
+
+export async function createJobOpening(job) {
+  return requestZoho('/JobOpenings', {
+    method: 'POST',
+    body: JSON.stringify({
+      data: [{
+        Job_Opening_Name: job.job_title || job.title || 'Untitled Job',
+        Client_Name: job.client_name || '',
+        Job_Opening_Status: 'In-progress',
+        Job_Type: job.employment_type || 'Full time',
+        Remote_Job: /remote/i.test(job.remote_policy || '') || false,
+        Required_Skills: job.tech_stack_must || job.must_have_stack || '',
+        Job_Description: job.full_job_description || job.raw_brief || job.candidate_profile || '',
+        City: job.location || '',
+        Number_of_Positions: '1',
+        Target_Date: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+      }],
+    }),
+  });
+}
+
+export async function createInterview(payload) {
+  return requestZoho('/Interviews', {
+    method: 'POST',
+    body: JSON.stringify({ data: [payload] }),
   });
 }
 

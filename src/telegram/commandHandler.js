@@ -4,9 +4,11 @@ import { parseJobBrief } from '../services/jobBriefParser.js';
 import { sourceCandidatesForJob } from '../services/candidateSourcing.js';
 import { runOrchestratorCycle } from '../services/outreachSequencer.js';
 import { getRecruiterChatId } from '../integrations/telegram.js';
-import { approveQueuedMessage, editQueuedMessage, skipQueuedMessage } from '../services/approvalService.js';
+import { approveQueuedMessage, editQueuedMessage, skipQueuedMessage, rejectPendingApprovalsForCandidate } from '../services/approvalService.js';
 import { deleteCandidateData } from '../services/gdprService.js';
 import { normalizeJobRecord, prepareJobPayload } from '../services/dbCompat.js';
+import { markConversationEnded } from '../services/conversationState.js';
+import { logActivity } from '../services/activityLogger.js';
 
 let bot;
 const pendingApprovalEdits = new Map();
@@ -112,15 +114,40 @@ export function startTelegramBot() {
     }
 
     const payload = String(query.data || '');
-    const [scope, action, approvalId] = payload.split(':');
-    if (scope !== 'approval' || !action || !approvalId) {
+    const [scope, action, targetId] = payload.split(':');
+    if (!scope || !action || !targetId) {
       await bot.answerCallbackQuery(query.id).catch(() => null);
       return;
     }
 
     try {
+      if (scope === 'candidate' && action === 'endchat') {
+        const { data: candidate } = await supabase.from('candidates').select('*').eq('id', targetId).single();
+        if (!candidate) {
+          await bot.answerCallbackQuery(query.id, { text: 'Candidate not found.' }).catch(() => null);
+          return;
+        }
+        const { data: updated } = await supabase
+          .from('candidates')
+          .update(markConversationEnded(candidate, 'Ended from Telegram approval card', { archive: true }))
+          .eq('id', targetId)
+          .select('*')
+          .single();
+        await rejectPendingApprovalsForCandidate(targetId, 'Conversation ended from Telegram');
+        await logActivity(updated.job_id, updated.id, 'CHAT_ENDED', `${updated.name} conversation ended from Telegram`, {
+          source: 'telegram',
+        });
+        await bot.answerCallbackQuery(query.id, { text: 'Chat ended and archived.' }).catch(() => null);
+        return;
+      }
+
+      if (scope !== 'approval') {
+        await bot.answerCallbackQuery(query.id).catch(() => null);
+        return;
+      }
+
       if (action === 'approve') {
-        const result = await approveQueuedMessage(approvalId);
+        const result = await approveQueuedMessage(targetId);
         await bot.answerCallbackQuery(query.id, {
           text: result?.status === 'sent' ? 'Approved and sent.' : 'Approved.',
         }).catch(() => null);
@@ -128,7 +155,7 @@ export function startTelegramBot() {
       }
 
       if (action === 'skip') {
-        const result = await skipQueuedMessage(approvalId);
+        const result = await skipQueuedMessage(targetId);
         await bot.answerCallbackQuery(query.id, {
           text: result ? 'Skipped.' : 'Already handled.',
         }).catch(() => null);
@@ -139,7 +166,7 @@ export function startTelegramBot() {
         const prompt = await bot.sendMessage(chatId, 'Reply to this message with the updated draft text for this approval.', {
           reply_markup: { force_reply: true, selective: true },
         });
-        pendingApprovalEdits.set(prompt.message_id, approvalId);
+        pendingApprovalEdits.set(prompt.message_id, targetId);
         await bot.answerCallbackQuery(query.id, { text: 'Send your edited draft as a reply.' }).catch(() => null);
       }
     } catch (error) {

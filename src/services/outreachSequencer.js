@@ -12,6 +12,7 @@ import { getRuntimeState } from './runtimeState.js';
 import { getChannelWindow, isWithinSendingWindow } from './scheduleService.js';
 import { buildTemplateAwarePrompt, parseTemplates } from './outreachTemplates.js';
 import { normalizeJobRecord } from './dbCompat.js';
+import { draftApplicantReply, fetchAndProcessApplicants, notifyTeamOfShortlist } from './inboundApplicantService.js';
 
 async function ensureDailyLimits(jobId) {
   const { data } = await supabase
@@ -275,53 +276,97 @@ async function checkStuckStages(job) {
 }
 
 export async function runJobCycle(job, runtimeState) {
-  const withinDefaultWindow = isWithinSendingWindow(job);
-  const withinInviteWindow = isWithinSendingWindow(job, new Date(), 'linkedin_invite');
+  const normalizedJob = normalizeJobRecord(job);
+  if (['inbound', 'both'].includes(normalizedJob.job_mode || 'outbound')) {
+    const lastFetch = normalizedJob.last_applicant_fetch_at;
+    const hoursSinceLastFetch = lastFetch
+      ? (Date.now() - new Date(lastFetch).getTime()) / (1000 * 60 * 60)
+      : 999;
+
+    if (hoursSinceLastFetch >= 23) {
+      await fetchAndProcessApplicants(normalizedJob);
+    }
+
+    const { data: newShortlisted } = await supabase
+      .from('candidates')
+      .select('*')
+      .eq('job_id', normalizedJob.id)
+      .eq('candidate_type', 'applicant')
+      .eq('team_pinged', false)
+      .in('fit_grade', ['HOT', 'WARM'])
+      .gte('fit_score', 50);
+
+    if (newShortlisted?.length) {
+      await notifyTeamOfShortlist(normalizedJob, newShortlisted);
+    }
+
+    const { data: replyable } = await supabase
+      .from('candidates')
+      .select('*')
+      .eq('job_id', normalizedJob.id)
+      .eq('candidate_type', 'applicant')
+      .eq('reply_sent', false)
+      .not('email', 'is', null)
+      .in('fit_grade', ['HOT', 'WARM'])
+      .limit(5);
+
+    for (const candidate of replyable || []) {
+      // eslint-disable-next-line no-await-in-loop
+      await draftApplicantReply(candidate, normalizedJob);
+    }
+  }
+
+  if (!['outbound', 'both'].includes(normalizedJob.job_mode || 'outbound')) {
+    return;
+  }
+
+  const withinDefaultWindow = isWithinSendingWindow(normalizedJob);
+  const withinInviteWindow = isWithinSendingWindow(normalizedJob, new Date(), 'linkedin_invite');
 
   if (runtimeState.researchEnabled) {
     const pipelineTarget = getNumericRuntimeValue('RAXION_SOURCING_PIPELINE_TARGET', 25);
     const shortlistTarget = getNumericRuntimeValue('RAXION_SOURCING_SHORTLIST_TARGET', 5);
     const cooldownHours = getNumericRuntimeValue('RAXION_SOURCING_COOLDOWN_HOURS', 6);
-    const pipelineCount = await getPipelineCandidateCount(job.id, ['Sourced', 'Shortlisted', 'Enriched']);
-    const shortlistedCount = await getPipelineCandidateCount(job.id, ['Shortlisted']);
+    const pipelineCount = await getPipelineCandidateCount(normalizedJob.id, ['Sourced', 'Shortlisted', 'Enriched']);
+    const shortlistedCount = await getPipelineCandidateCount(normalizedJob.id, ['Shortlisted']);
     const cooldownMs = cooldownHours * 60 * 60 * 1000;
     const shouldTopUp = pipelineCount < pipelineTarget || shortlistedCount < shortlistTarget;
 
-    if (shouldTopUp && (!job.last_research_at || Date.now() - new Date(job.last_research_at).getTime() > cooldownMs)) {
-      await logActivity(job.id, null, 'AUTO_SOURCING', `Pipeline top-up triggered (pre-outreach: ${pipelineCount}/${pipelineTarget}, shortlisted: ${shortlistedCount}/${shortlistTarget}, cooldown: ${cooldownHours}h)`, {});
-      await sourceCandidatesForJob(job);
-      await supabase.from('jobs').update({ last_research_at: new Date().toISOString() }).eq('id', job.id);
+    if (shouldTopUp && (!normalizedJob.last_research_at || Date.now() - new Date(normalizedJob.last_research_at).getTime() > cooldownMs)) {
+      await logActivity(normalizedJob.id, null, 'AUTO_SOURCING', `Pipeline top-up triggered (pre-outreach: ${pipelineCount}/${pipelineTarget}, shortlisted: ${shortlistedCount}/${shortlistTarget}, cooldown: ${cooldownHours}h)`, {});
+      await sourceCandidatesForJob(normalizedJob);
+      await supabase.from('jobs').update({ last_research_at: new Date().toISOString() }).eq('id', normalizedJob.id);
     }
   }
 
-  await scoreUnscoredCandidates(job);
+  await scoreUnscoredCandidates(normalizedJob);
 
   if (runtimeState.enrichmentEnabled) {
-    await processEnrichmentQueue(job.id);
+    await processEnrichmentQueue(normalizedJob.id);
   }
 
   if (withinInviteWindow && runtimeState.linkedinEnabled && runtimeState.outreachEnabled) {
-    await sendAutonomousConnectionRequests(job);
+    await sendAutonomousConnectionRequests(normalizedJob);
   }
 
   if (runtimeState.linkedinEnabled && runtimeState.outreachEnabled) {
-    await draftFirstDMs(job);
+    await draftFirstDMs(normalizedJob);
   }
 
   if (runtimeState.outreachEnabled) {
-    await draftOutboundEmails(job);
+    await draftOutboundEmails(normalizedJob);
   }
 
   if (runtimeState.followupEnabled) {
-    await draftFollowUps(job);
+    await draftFollowUps(normalizedJob);
   }
 
-  if (withinDefaultWindow || isWithinSendingWindow(job, new Date(), 'linkedin_dm') || isWithinSendingWindow(job, new Date(), 'email')) {
-    await executeApprovedSends(job);
+  if (withinDefaultWindow || isWithinSendingWindow(normalizedJob, new Date(), 'linkedin_dm') || isWithinSendingWindow(normalizedJob, new Date(), 'email')) {
+    await executeApprovedSends(normalizedJob);
   } else {
-    const defaultWindow = getChannelWindow(job, 'default');
-    const templates = parseTemplates(job.outreach_templates);
-    await logActivityOncePerWindow(job.id, null, 'OUTSIDE_SENDING_WINDOW', `Outside sending window for ${job.job_title}; sourcing, scoring, enrichment, and drafting continue`, {
+    const defaultWindow = getChannelWindow(normalizedJob, 'default');
+    const templates = parseTemplates(normalizedJob.outreach_templates);
+    await logActivityOncePerWindow(normalizedJob.id, null, 'OUTSIDE_SENDING_WINDOW', `Outside sending window for ${normalizedJob.job_title}; sourcing, scoring, enrichment, and drafting continue`, {
       send_from: defaultWindow.send_from,
       send_until: defaultWindow.send_until,
       timezone: defaultWindow.timezone,
@@ -330,7 +375,7 @@ export async function runJobCycle(job, runtimeState) {
     }, 60);
   }
 
-  await checkStuckStages(job);
+  await checkStuckStages(normalizedJob);
 }
 
 export async function runOrchestratorCycle() {
