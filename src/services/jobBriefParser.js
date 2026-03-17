@@ -1,6 +1,7 @@
 import supabase from '../db/supabase.js';
 import { callClaude } from '../integrations/claude.js';
 import { buildJobBriefPrompt, jobBriefSystemPrompt } from '../prompts/parseJobBrief.js';
+import { prepareJobPayload, normalizeJobRecord } from './dbCompat.js';
 
 export async function parseJobBrief(rawText) {
   const parsed = await callClaude(buildJobBriefPrompt(rawText), jobBriefSystemPrompt, { expectJson: true });
@@ -24,7 +25,7 @@ export async function parseJobBrief(rawText) {
     full_job_description: rawText,
   };
 
-  const { data, error } = await supabase.from('jobs').insert(payload).select('*').single();
+  const { data, error } = await supabase.from('jobs').insert(await prepareJobPayload(payload)).select('*').single();
   if (error) throw error;
-  return data;
+  return normalizeJobRecord(data);
 }

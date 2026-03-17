@@ -4,6 +4,7 @@ import { searchLinkedInPeople, getLinkedInProfile, getJobApplicants, downloadApp
 import { sendTelegramMessage, getRecruiterChatId } from '../integrations/telegram.js';
 import { sleep } from '../lib_utils.js';
 import { logActivity } from './activityLogger.js';
+import { normalizeJobRecord } from './dbCompat.js';
 
 let scoreHistoryColumnsSupported;
 
@@ -200,9 +201,9 @@ export async function scoreCandidateAgainstJob(candidateProfile, job) {
 }
 
 async function getJob(jobOrId) {
-  if (typeof jobOrId === 'object') return jobOrId;
+  if (typeof jobOrId === 'object') return normalizeJobRecord(jobOrId);
   const { data } = await supabase.from('jobs').select('*').eq('id', jobOrId).single();
-  return data;
+  return normalizeJobRecord(data);
 }
 
 async function getActiveDuplicateProviderIds(jobId, providerIds = []) {

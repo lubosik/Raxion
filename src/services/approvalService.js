@@ -3,6 +3,13 @@ import { sendTelegramMessage, editTelegramMessage, getRecruiterChatId } from '..
 import { startLinkedInDM, sendLinkedInDM, sendEmail } from '../integrations/unipile.js';
 import { todayIsoDate } from '../lib_utils.js';
 import { logActivity } from './activityLogger.js';
+import {
+  normalizeApprovalRecord,
+  normalizeJobRecord,
+  prepareApprovalInsertPayload,
+  prepareApprovalUpdatePayload,
+  prepareConversationInsertPayload,
+} from './dbCompat.js';
 
 const UNSENT_APPROVAL_STATUSES = ['pending', 'edited', 'approved'];
 
@@ -39,15 +46,17 @@ export function validateDraftMessage(content, candidate) {
 }
 
 function approvalMessage(candidate, job, approval) {
+  const normalizedJob = normalizeJobRecord(job);
+  const normalizedApproval = normalizeApprovalRecord(approval);
   return [
     `👤 *${candidate.name || 'Unknown'}* - ${candidate.current_title || 'Unknown title'} at ${candidate.current_company || 'Unknown company'}`,
-    `💼 *JOB:* ${job.job_title || job.name} at ${job.client_name || 'Unknown client'}`,
+    `💼 *JOB:* ${normalizedJob.job_title || normalizedJob.name} at ${normalizedJob.client_name || 'Unknown client'}`,
     `📊 Fit Score: ${candidate.fit_score || 0} - ${candidate.fit_grade || 'UNKNOWN'}`,
-    `📍 Stage: ${approval.channel} -> ${approval.stage}`,
+    `📍 Stage: ${normalizedApproval.channel} -> ${normalizedApproval.stage}`,
     `🎯 ${candidate.linkedin_url || 'No LinkedIn URL'}`,
     '',
     '--- MESSAGE ---',
-    approval.message_text || '',
+    normalizedApproval.message_text || '',
     '---------------',
     '',
     `✅ /approve_${approval.id}`,
@@ -62,7 +71,7 @@ async function getApprovalContext(approval) {
     supabase.from('jobs').select('*').eq('id', approval.job_id).single(),
   ]);
 
-  return { candidate, job };
+  return { candidate, job: normalizeJobRecord(job) };
 }
 
 async function findExistingApproval(candidateId, channel, stage) {
@@ -76,44 +85,45 @@ async function findExistingApproval(candidateId, channel, stage) {
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle();
-
-  return data;
+  return normalizeApprovalRecord(data);
 }
 
 async function executeSend(approval, candidate) {
-  validateDraftMessage(approval.message_text, candidate);
+  const normalizedApproval = normalizeApprovalRecord(approval);
+  validateDraftMessage(normalizedApproval.message_text, candidate);
 
-  if (approval.channel === 'linkedin_dm') {
+  if (normalizedApproval.channel === 'linkedin_dm') {
     if (!candidate.linkedin_provider_id && !candidate.unipile_chat_id) {
       throw new Error('Missing LinkedIn identifiers for DM');
     }
     if (!candidate.unipile_chat_id) {
-      return startLinkedInDM(candidate.linkedin_provider_id, approval.message_text);
+      return startLinkedInDM(candidate.linkedin_provider_id, normalizedApproval.message_text);
     }
-    return sendLinkedInDM(candidate.unipile_chat_id, approval.message_text);
+    return sendLinkedInDM(candidate.unipile_chat_id, normalizedApproval.message_text);
   }
 
-  if (approval.channel === 'email') {
+  if (normalizedApproval.channel === 'email') {
     if (!candidate.email) {
       throw new Error('Missing email address for email send');
     }
-    return sendEmail(candidate.email, candidate.name, `${candidate.current_title || 'Opportunity'} at ${candidate.current_company || 'Raxion'}`, approval.message_text);
+    return sendEmail(candidate.email, candidate.name, `${candidate.current_title || 'Opportunity'} at ${candidate.current_company || 'Raxion'}`, normalizedApproval.message_text);
   }
 
-  throw new Error(`Unsupported channel ${approval.channel}`);
+  throw new Error(`Unsupported channel ${normalizedApproval.channel}`);
 }
 
 async function applyStageAfterSend(approval, candidate, result) {
+  const normalizedApproval = normalizeApprovalRecord(approval);
   const updates = {};
   const now = new Date().toISOString();
 
-  if (approval.channel === 'linkedin_dm') {
-    updates.pipeline_stage = approval.stage || 'dm_sent';
+  if (normalizedApproval.channel === 'linkedin_dm') {
+    updates.pipeline_stage = normalizedApproval.stage || 'dm_sent';
     updates.dm_sent_at = now;
     updates.unipile_chat_id = result?.chat_id || candidate.unipile_chat_id;
     updates.follow_up_due_at = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
-  } else if (approval.channel === 'email') {
-    updates.pipeline_stage = approval.stage || 'email_sent';
+  } else if (normalizedApproval.channel === 'email') {
+    updates.pipeline_stage = normalizedApproval.stage || 'email_sent';
     updates.follow_up_due_at = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
   }
 
@@ -121,14 +131,16 @@ async function applyStageAfterSend(approval, candidate, result) {
     await supabase.from('candidates').update(updates).eq('id', candidate.id);
   }
 
-  await supabase.from('conversations').insert({
+  await supabase.from('conversations').insert(await prepareConversationInsertPayload({
     candidate_id: candidate.id,
-    job_id: approval.job_id,
+    job_id: normalizedApproval.job_id,
     direction: 'outbound',
-    channel: approval.channel,
-    message_text: approval.message_text,
+    channel: normalizedApproval.channel,
+    message_text: normalizedApproval.message_text,
     unipile_message_id: result?.message_id || null,
-  });
+    sent_at: new Date().toISOString(),
+    read: true,
+  }));
 }
 
 async function incrementDailyLimit(approval) {
@@ -142,8 +154,9 @@ async function incrementDailyLimit(approval) {
   if (!limits) return;
 
   const updates = {};
-  if (approval.channel === 'linkedin_dm') updates.dms_sent = (limits.dms_sent || 0) + 1;
-  if (approval.channel === 'email') updates.emails_sent = (limits.emails_sent || 0) + 1;
+  const normalizedApproval = normalizeApprovalRecord(approval);
+  if (normalizedApproval.channel === 'linkedin_dm') updates.dms_sent = (limits.dms_sent || 0) + 1;
+  if (normalizedApproval.channel === 'email') updates.emails_sent = (limits.emails_sent || 0) + 1;
   if (Object.keys(updates).length) {
     await supabase.from('daily_limits').update(updates).eq('job_id', approval.job_id).eq('date', todayIsoDate());
   }
@@ -195,32 +208,35 @@ export async function queueApproval({ candidateId, jobId, messageText, channel, 
     return existing;
   }
 
-  const { data: approval, error } = await supabase.from('approval_queue').insert({
+  const { data: approval, error } = await supabase.from('approval_queue').insert(await prepareApprovalInsertPayload({
     candidate_id: candidateId,
     job_id: jobId,
     message_text: messageText,
     channel,
     stage,
-  }).select('*').single();
+    message_type: channel,
+  })).select('*').single();
   if (error || !approval) return null;
+  const normalizedApproval = normalizeApprovalRecord(approval);
 
   const telegramResponse = await sendTelegramMessage(getRecruiterChatId(), approvalMessage(candidate, job, approval)).catch(() => null);
   if (telegramResponse?.result?.message_id) {
-    await supabase.from('approval_queue').update({
+    await supabase.from('approval_queue').update(await prepareApprovalUpdatePayload({
       telegram_message_id: String(telegramResponse.result.message_id),
-    }).eq('id', approval.id);
+    })).eq('id', approval.id);
   }
 
   await logActivity(jobId, candidateId, 'MESSAGE_DRAFTED', `Drafted ${channel} and queued for approval`, {
-    approval_id: approval.id,
+    approval_id: normalizedApproval.id,
     channel,
     stage,
   });
-  return approval;
+  return normalizedApproval;
 }
 
 export async function approveQueuedMessage(approvalId) {
-  const { data: approval } = await supabase.from('approval_queue').select('*').eq('id', approvalId).single();
+  const { data: rawApproval } = await supabase.from('approval_queue').select('*').eq('id', approvalId).single();
+  const approval = normalizeApprovalRecord(rawApproval);
   if (!approval || !['pending', 'edited'].includes(approval.status)) return null;
 
   const { candidate } = await getApprovalContext(approval);
@@ -236,12 +252,15 @@ export async function approveQueuedMessage(approvalId) {
     return null;
   }
 
-  const { data: updated } = await supabase.from('approval_queue').update({ status: 'approved' }).eq('id', approvalId).select('*').single();
+  const { data: updated } = await supabase.from('approval_queue').update(await prepareApprovalUpdatePayload({
+    status: 'approved',
+    approved_at: new Date().toISOString(),
+  })).eq('id', approvalId).select('*').single();
   await logActivity(approval.job_id, approval.candidate_id, 'MESSAGE_APPROVED', `Recruiter approved ${approval.channel}`, {
     approval_id: approvalId,
     channel: approval.channel,
   });
-  return updated || approval;
+  return normalizeApprovalRecord(updated) || approval;
 }
 
 export async function executeApprovedSends(job) {
@@ -256,7 +275,8 @@ export async function executeApprovedSends(job) {
   let sentCount = 0;
 
   for (const approval of approvals || []) {
-    if (approval.channel === 'connection_request') {
+    const normalizedApproval = normalizeApprovalRecord(approval);
+    if (normalizedApproval.channel === 'connection_request') {
       // Legacy queue items are ignored now that invites send autonomously.
       // eslint-disable-next-line no-await-in-loop
       await supabase.from('approval_queue').update({ status: 'rejected' }).eq('id', approval.id);
@@ -269,7 +289,7 @@ export async function executeApprovedSends(job) {
       continue;
     }
 
-    const { candidate } = await getApprovalContext(approval);
+      const { candidate } = await getApprovalContext(normalizedApproval);
     if (!candidate) {
       // eslint-disable-next-line no-await-in-loop
       await supabase.from('approval_queue').update({ status: 'error' }).eq('id', approval.id);
@@ -282,20 +302,23 @@ export async function executeApprovedSends(job) {
 
     try {
       // eslint-disable-next-line no-await-in-loop
-      const result = await executeSend(approval, candidate);
+      const result = await executeSend(normalizedApproval, candidate);
       if (!result) {
         throw new Error('Unipile send returned no result');
       }
       // eslint-disable-next-line no-await-in-loop
-      await applyStageAfterSend(approval, candidate, result);
+      await applyStageAfterSend(normalizedApproval, candidate, result);
       // eslint-disable-next-line no-await-in-loop
-      await incrementDailyLimit(approval);
+      await incrementDailyLimit(normalizedApproval);
       // eslint-disable-next-line no-await-in-loop
-      await supabase.from('approval_queue').update({ status: 'sent' }).eq('id', approval.id);
+      await supabase.from('approval_queue').update(await prepareApprovalUpdatePayload({
+        status: 'sent',
+        sent_at: new Date().toISOString(),
+      })).eq('id', approval.id);
       // eslint-disable-next-line no-await-in-loop
-      await logActivity(approval.job_id, approval.candidate_id, 'MESSAGE_SENT', `Sent ${approval.channel} via Unipile`, {
+      await logActivity(approval.job_id, approval.candidate_id, 'MESSAGE_SENT', `Sent ${normalizedApproval.channel} via Unipile`, {
         approval_id: approval.id,
-        channel: approval.channel,
+        channel: normalizedApproval.channel,
         sent_at: new Date().toISOString(),
       });
       sentCount += 1;
@@ -303,9 +326,9 @@ export async function executeApprovedSends(job) {
       // eslint-disable-next-line no-await-in-loop
       await supabase.from('approval_queue').update({ status: 'error' }).eq('id', approval.id);
       // eslint-disable-next-line no-await-in-loop
-      await logActivity(approval.job_id, approval.candidate_id, 'MESSAGE_SEND_ERROR', `Failed to send ${approval.channel}: ${error.message}`, {
+      await logActivity(approval.job_id, approval.candidate_id, 'MESSAGE_SEND_ERROR', `Failed to send ${normalizedApproval.channel}: ${error.message}`, {
         approval_id: approval.id,
-        channel: approval.channel,
+        channel: normalizedApproval.channel,
       });
     }
   }
@@ -314,7 +337,8 @@ export async function executeApprovedSends(job) {
 }
 
 export async function editQueuedMessage(approvalId, messageText) {
-  const { data: existing } = await supabase.from('approval_queue').select('*').eq('id', approvalId).single();
+  const { data: rawExisting } = await supabase.from('approval_queue').select('*').eq('id', approvalId).single();
+  const existing = normalizeApprovalRecord(rawExisting);
   if (!existing || !['pending', 'edited'].includes(existing.status)) return null;
 
   const { candidate, job } = await getApprovalContext(existing);
@@ -330,23 +354,25 @@ export async function editQueuedMessage(approvalId, messageText) {
     return null;
   }
 
-  const { data: approval } = await supabase.from('approval_queue').update({
+  const { data: approval } = await supabase.from('approval_queue').update(await prepareApprovalUpdatePayload({
     message_text: messageText,
     status: 'edited',
-  }).eq('id', approvalId).select('*').single();
+  })).eq('id', approvalId).select('*').single();
   if (!approval) return null;
+  const normalizedApproval = normalizeApprovalRecord(approval);
 
-  if (approval.telegram_message_id) {
-    await editTelegramMessage(getRecruiterChatId(), approval.telegram_message_id, approvalMessage(candidate, job, approval)).catch(() => null);
+  if (normalizedApproval.telegram_message_id) {
+    await editTelegramMessage(getRecruiterChatId(), normalizedApproval.telegram_message_id, approvalMessage(candidate, job, normalizedApproval)).catch(() => null);
   }
 
   await logActivity(approval.job_id, approval.candidate_id, 'MESSAGE_DRAFT_UPDATED', `Edited queued ${approval.channel} message`, { approval_id: approvalId });
-  return approval;
+  return normalizedApproval;
 }
 
 export async function skipQueuedMessage(approvalId) {
-  const { data: approval } = await supabase.from('approval_queue').update({ status: 'rejected' }).eq('id', approvalId).select('*').single();
+  const { data: approval } = await supabase.from('approval_queue').update(await prepareApprovalUpdatePayload({ status: 'rejected' })).eq('id', approvalId).select('*').single();
   if (!approval) return null;
-  await logActivity(approval.job_id, approval.candidate_id, 'MESSAGE_SKIPPED', `Skipped queued ${approval.channel} message`, { approval_id: approvalId });
-  return approval;
+  const normalizedApproval = normalizeApprovalRecord(approval);
+  await logActivity(approval.job_id, approval.candidate_id, 'MESSAGE_SKIPPED', `Skipped queued ${normalizedApproval.channel} message`, { approval_id: approvalId });
+  return normalizedApproval;
 }

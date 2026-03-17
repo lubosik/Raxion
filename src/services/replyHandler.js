@@ -5,6 +5,7 @@ import { sendTelegramMessage, getRecruiterChatId } from '../integrations/telegra
 import { syncCandidateToATS } from '../integrations/zohoRecruit.js';
 import { queueApproval } from './approvalService.js';
 import { logActivity } from './activityLogger.js';
+import { normalizeConversationRecord, normalizeJobRecord, prepareConversationInsertPayload } from './dbCompat.js';
 
 async function classifyReply(candidate, job, conversationHistory, messageText) {
   return callClaude(
@@ -34,7 +35,7 @@ async function extractCv(buffer) {
 
 async function getConversationHistory(candidateId) {
   const { data } = await supabase.from('conversations').select('*').eq('candidate_id', candidateId).order('sent_at', { ascending: true });
-  return data || [];
+  return (data || []).map(normalizeConversationRecord);
 }
 
 async function getRemoteConversationHistory(chatId) {
@@ -78,14 +79,15 @@ export async function processIncomingMessage(webhookPayload) {
     return null;
   }
 
-  const { data: job } = await supabase.from('jobs').select('*').eq('id', candidate.job_id).single();
+  const { data: rawJob } = await supabase.from('jobs').select('*').eq('id', candidate.job_id).single();
+  const job = normalizeJobRecord(rawJob);
   const [conversationHistory, remoteConversationHistory] = await Promise.all([
     getConversationHistory(candidate.id),
     getRemoteConversationHistory(chatId || candidate.unipile_chat_id),
   ]);
   const fullConversationHistory = remoteConversationHistory.length ? remoteConversationHistory : conversationHistory;
 
-  await supabase.from('conversations').insert({
+  await supabase.from('conversations').insert(await prepareConversationInsertPayload({
     candidate_id: candidate.id,
     job_id: candidate.job_id,
     direction: 'inbound',
@@ -94,7 +96,7 @@ export async function processIncomingMessage(webhookPayload) {
     unipile_message_id: messageId,
     sent_at: timestamp,
     read: false,
-  });
+  }));
 
   await supabase.from('candidates').update({
     last_reply_at: new Date().toISOString(),

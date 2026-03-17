@@ -6,6 +6,7 @@ import { runOrchestratorCycle } from '../services/outreachSequencer.js';
 import { getRecruiterChatId } from '../integrations/telegram.js';
 import { approveQueuedMessage, editQueuedMessage, skipQueuedMessage } from '../services/approvalService.js';
 import { deleteCandidateData } from '../services/gdprService.js';
+import { normalizeJobRecord, prepareJobPayload } from '../services/dbCompat.js';
 
 let bot;
 
@@ -25,13 +26,17 @@ async function handleStatusCommand(chatId) {
     supabase.from('candidates').select('*', { count: 'exact', head: true }).not('last_reply_at', 'is', null),
     supabase.from('candidates').select('*', { count: 'exact', head: true }).not('interview_booked_at', 'is', null),
   ]);
-  const lines = (jobs || []).map((job) => `• ${job.job_title} at ${job.client_name} (${job.paused ? 'Paused' : job.status})`);
+  const lines = (jobs || []).map((job) => {
+    const normalized = normalizeJobRecord(job);
+    return `• ${normalized.job_title} at ${normalized.client_name} (${normalized.paused ? 'Paused' : normalized.status})`;
+  });
   await bot.sendMessage(chatId, `📊 Raxion status\nActive jobs: ${jobs?.length || 0}\nCandidates: ${candidates || 0}\nInvites sent: ${invites || 0}\nReplies: ${replies || 0}\nInterviews booked: ${interviews || 0}\n${lines.join('\n') || 'No active jobs.'}`);
 }
 
 async function handleJobCommand(chatId, text) {
   const jobId = text.replace(/^\/job\s*/i, '').trim();
-  const { data: job } = await supabase.from('jobs').select('*').eq('id', jobId).maybeSingle();
+  const { data: rawJob } = await supabase.from('jobs').select('*').eq('id', jobId).maybeSingle();
+  const job = normalizeJobRecord(rawJob);
   if (!job) return bot.sendMessage(chatId, 'No matching job found.');
   const { data: candidates } = await supabase.from('candidates').select('pipeline_stage').eq('job_id', job.id);
   const counts = (candidates || []).reduce((acc, item) => {
@@ -66,11 +71,11 @@ export function startTelegramBot() {
       }
       if (message.text.startsWith('/skip_')) return skipQueuedMessage(message.text.replace('/skip_', '').trim()).then(() => bot.sendMessage(chatId, 'Skipped.'));
       if (message.text === '/pause') {
-        await supabase.from('jobs').update({ paused: true, status: 'PAUSED' }).not('id', 'is', null);
+        await supabase.from('jobs').update(await prepareJobPayload({ paused: true, paused_until: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(), status: 'PAUSED' })).not('id', 'is', null);
         return bot.sendMessage(chatId, '⏸ Sequencer paused');
       }
       if (message.text === '/resume') {
-        await supabase.from('jobs').update({ paused: false, status: 'ACTIVE' }).eq('status', 'PAUSED');
+        await supabase.from('jobs').update(await prepareJobPayload({ paused: false, paused_until: null, status: 'ACTIVE' })).eq('status', 'PAUSED');
         await runOrchestratorCycle().catch(() => null);
         return bot.sendMessage(chatId, '▶️ Sequencer resumed');
       }

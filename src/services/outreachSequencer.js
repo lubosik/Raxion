@@ -11,6 +11,7 @@ import { sourceCandidatesForJob, scoreUnscoredCandidates } from './candidateSour
 import { getRuntimeState } from './runtimeState.js';
 import { isWithinSendingWindow } from './scheduleService.js';
 import { buildTemplateAwarePrompt } from './outreachTemplates.js';
+import { normalizeJobRecord } from './dbCompat.js';
 
 async function ensureDailyLimits(jobId) {
   const { data } = await supabase
@@ -315,7 +316,8 @@ export async function runOrchestratorCycle() {
     .order('created_at', { ascending: true });
 
   let processed = 0;
-  for (const job of jobs || []) {
+  for (const rawJob of jobs || []) {
+    const job = normalizeJobRecord(rawJob);
     if (job.paused) continue;
     try {
       // eslint-disable-next-line no-await-in-loop

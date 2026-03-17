@@ -89,7 +89,7 @@ export function createUnipileWebhookRouter() {
 
     const { data: candidate } = await supabase
       .from('candidates')
-      .select('*, jobs!inner(id, job_title, status)')
+      .select('*, jobs!inner(*)')
       .eq('linkedin_provider_id', providerId)
       .in('pipeline_stage', ['invite_sent', 'Shortlisted', 'Enriched'])
       .eq('jobs.status', 'ACTIVE')

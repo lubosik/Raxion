@@ -12,6 +12,12 @@ import { generateInterviewBrief } from '../services/qualificationEngine.js';
 import { getRuntimeState, toggleRuntimeStateValue } from '../services/runtimeState.js';
 import { listRuntimeConfig, setRuntimeConfigValue, deleteRuntimeConfigValue } from '../services/configService.js';
 import { getIntegrationHealth } from '../services/healthService.js';
+import {
+  normalizeApprovalRecord,
+  normalizeConversationRecord,
+  normalizeJobRecord,
+  prepareJobPayload,
+} from '../services/dbCompat.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -64,7 +70,8 @@ function htmlPage() {
 }
 
 async function getJobWithMetrics(job) {
-  return { ...job, metrics: await fetchJobMetrics(job.id) };
+  const normalized = normalizeJobRecord(job);
+  return { ...normalized, metrics: await fetchJobMetrics(normalized.id) };
 }
 
 export function createDashboardServer() {
@@ -171,10 +178,11 @@ export function createDashboardServer() {
       name: req.body.name || req.body.job_title,
       status: 'ACTIVE',
     };
-    const { data: job, error } = await supabase.from('jobs').insert(payload).select('*').single();
+    const { data: job, error } = await supabase.from('jobs').insert(await prepareJobPayload(payload)).select('*').single();
     if (error) return res.status(400).json({ error: error.message });
-    sourceCandidatesForJob(job).catch(() => null);
-    res.json({ job_id: job.id });
+    const normalized = normalizeJobRecord(job);
+    sourceCandidatesForJob(normalized).catch(() => null);
+    res.json({ job_id: normalized.id });
   });
 
   app.get('/api/jobs', async (req, res) => {
@@ -187,34 +195,36 @@ export function createDashboardServer() {
     const { data: job } = await supabase.from('jobs').select('*').eq('id', req.params.id).single();
     const { data: activity } = await supabase.from('activity_log').select('*').eq('job_id', req.params.id).order('created_at', { ascending: false }).limit(20);
     const { data: assets } = await supabase.from('job_assets').select('*').eq('job_id', req.params.id).order('created_at', { ascending: false });
-    res.json({ ...job, metrics: await fetchJobMetrics(job.id), recent_activity: activity || [], assets: assets || [] });
+    const normalized = normalizeJobRecord(job);
+    res.json({ ...normalized, metrics: await fetchJobMetrics(normalized.id), recent_activity: activity || [], assets: assets || [] });
   });
 
   app.patch('/api/jobs/:id', async (req, res) => {
-    const { data, error } = await supabase.from('jobs').update(req.body).eq('id', req.params.id).select('*').single();
+    const { data, error } = await supabase.from('jobs').update(await prepareJobPayload(req.body)).eq('id', req.params.id).select('*').single();
     if (error) return res.status(400).json({ error: error.message });
-    res.json(data);
+    res.json(normalizeJobRecord(data));
   });
 
-  app.post('/api/jobs/:id/pause', async (req, res) => res.json((await supabase.from('jobs').update({ paused: true, status: 'PAUSED' }).eq('id', req.params.id).select('*').single()).data));
-  app.post('/api/jobs/:id/resume', async (req, res) => res.json((await supabase.from('jobs').update({ paused: false, status: 'ACTIVE' }).eq('id', req.params.id).select('*').single()).data));
+  app.post('/api/jobs/:id/pause', async (req, res) => res.json(normalizeJobRecord((await supabase.from('jobs').update(await prepareJobPayload({ paused: true, paused_until: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(), status: 'PAUSED' })).eq('id', req.params.id).select('*').single()).data)));
+  app.post('/api/jobs/:id/resume', async (req, res) => res.json(normalizeJobRecord((await supabase.from('jobs').update(await prepareJobPayload({ paused: false, paused_until: null, status: 'ACTIVE' })).eq('id', req.params.id).select('*').single()).data)));
   app.post('/api/jobs/:id/close', async (req, res) => {
     const { data: job } = await supabase.from('jobs').select('*').eq('id', req.params.id).single();
-    await closeLinkedInJob(job).catch(() => null);
-    const { data } = await supabase.from('jobs').update({ status: 'CLOSED', paused: true, closed_at: new Date().toISOString() }).eq('id', req.params.id).select('*').single();
-    res.json(data);
+    await closeLinkedInJob(normalizeJobRecord(job)).catch(() => null);
+    const { data } = await supabase.from('jobs').update(await prepareJobPayload({ status: 'CLOSED', paused: true, paused_until: null, closed_at: new Date().toISOString() })).eq('id', req.params.id).select('*').single();
+    res.json(normalizeJobRecord(data));
   });
   app.post('/api/jobs/:id/post-to-linkedin', async (req, res) => {
     const { data: job } = await supabase.from('jobs').select('*').eq('id', req.params.id).single();
-    res.json(await postJobToLinkedIn(job));
+    res.json(await postJobToLinkedIn(normalizeJobRecord(job)));
   });
   app.post('/api/jobs/:id/source-now', async (req, res) => {
     const { data: job } = await supabase.from('jobs').select('*').eq('id', req.params.id).single();
     if (!job) return res.status(404).json({ error: 'Job not found' });
-    sourceCandidatesForJob(job).catch((error) => {
+    const normalized = normalizeJobRecord(job);
+    sourceCandidatesForJob(normalized).catch((error) => {
       console.error('[dashboard] source-now failed', { jobId: job.id, error: error.message });
     });
-    res.json({ started: true, job_id: job.id });
+    res.json({ started: true, job_id: normalized.id });
   });
   app.post('/api/jobs/:id/ingest-applicants', async (req, res) => {
     const { data: job } = await supabase.from('jobs').select('*').eq('id', req.params.id).single();
@@ -272,11 +282,11 @@ export function createDashboardServer() {
   app.get('/api/jobs/:id/approval-queue', async (req, res) => {
     const { data } = await supabase
       .from('approval_queue')
-      .select('*, candidates(name, current_title, current_company, fit_score, fit_grade), jobs(job_title, client_name)')
+      .select('*, candidates(name, current_title, current_company, fit_score, fit_grade), jobs(*)')
       .eq('job_id', req.params.id)
       .in('status', ['pending', 'edited', 'approved'])
       .order('created_at', { ascending: false });
-    res.json(data || []);
+    res.json((data || []).map((row) => ({ ...normalizeApprovalRecord(row), jobs: normalizeJobRecord(row.jobs) })));
   });
 
   app.get('/api/candidates/:id', async (req, res) => {
@@ -286,7 +296,7 @@ export function createDashboardServer() {
       supabase.from('activity_log').select('*').eq('candidate_id', req.params.id).order('created_at', { ascending: false }),
       supabase.from('approval_queue').select('*').eq('candidate_id', req.params.id).in('status', ['pending', 'edited', 'approved']).order('created_at', { ascending: false }),
     ]);
-    res.json({ ...candidate, conversation_history: conversations || [], activity_log: activity || [], approvals: approvals || [] });
+    res.json({ ...candidate, conversation_history: (conversations || []).map(normalizeConversationRecord), activity_log: activity || [], approvals: (approvals || []).map(normalizeApprovalRecord) });
   });
 
   app.post('/api/candidates/:id/stage', async (req, res) => {
@@ -327,11 +337,11 @@ export function createDashboardServer() {
   app.get('/api/inbox', async (req, res) => {
     const { data } = await supabase
       .from('conversations')
-      .select('*, candidates(id, name, current_company, job_id), jobs(job_title, client_name)')
+      .select('*, candidates(id, name, current_company, job_id), jobs(*)')
       .eq('direction', 'inbound')
       .order('sent_at', { ascending: false })
       .limit(200);
-    res.json(data || []);
+    res.json((data || []).map((row) => ({ ...normalizeConversationRecord(row), jobs: normalizeJobRecord(row.jobs) })));
   });
 
   app.get('/api/activity', async (req, res) => {
@@ -342,10 +352,10 @@ export function createDashboardServer() {
   app.get('/api/approval-queue', async (req, res) => {
     const { data } = await supabase
       .from('approval_queue')
-      .select('*, candidates(name, current_title, current_company, fit_score, fit_grade), jobs(job_title, client_name)')
+      .select('*, candidates(name, current_title, current_company, fit_score, fit_grade), jobs(*)')
       .in('status', ['pending', 'edited', 'approved'])
       .order('created_at', { ascending: false });
-    res.json(data || []);
+    res.json((data || []).map((row) => ({ ...normalizeApprovalRecord(row), jobs: normalizeJobRecord(row.jobs) })));
   });
 
   app.post('/api/approval-queue/:id/approve', async (req, res) => res.json(await approveQueuedMessage(req.params.id)));
