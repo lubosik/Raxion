@@ -5,8 +5,58 @@ import { sendTelegramMessage, getRecruiterChatId } from '../integrations/telegra
 import { sleep } from '../lib_utils.js';
 import { logActivity } from './activityLogger.js';
 import { normalizeJobRecord } from './dbCompat.js';
+import { getRuntimeConfigValue } from './configService.js';
 
 let scoreHistoryColumnsSupported;
+
+const GENERIC_TITLE_TERMS = new Set([
+  'agent',
+  'consultant',
+  'manager',
+  'executive',
+  'specialist',
+  'associate',
+  'advisor',
+  'lead',
+  'head',
+  'director',
+  'senior',
+  'junior',
+  'principal',
+  'staff',
+  'remote',
+  'hybrid',
+  'onsite',
+  'full',
+  'time',
+]);
+
+const DISQUALIFYING_JUNIOR_TERMS = [
+  'student',
+  'intern',
+  'undergraduate',
+  'college',
+  'university',
+  'graduate student',
+  'high school',
+  'entry level',
+  'trainee',
+];
+
+const ROLE_SIGNAL_RULES = [
+  {
+    matches: ['real estate', 'estate agent', 'realtor', 'property'],
+    requireAny: ['real estate', 'realtor', 'estate agent', 'property', 'broker', 'brokerage', 'leasing', 'lettings', 'mortgage'],
+  },
+  {
+    matches: ['recruit', 'talent acquisition', 'headhunt', 'sourcer'],
+    requireAny: ['recruit', 'recruiter', 'recruitment', 'talent acquisition', 'headhunter', 'sourcer', 'staffing'],
+  },
+  {
+    matches: ['software engineer', 'developer', 'backend', 'frontend', 'full stack'],
+    requireAny: ['software', 'engineer', 'developer', 'backend', 'frontend', 'full stack', 'javascript', 'node', 'react', 'python'],
+  },
+];
 
 function normalizeScoreResult(scoreResult) {
   const fitScore = Math.max(0, Math.min(100, Math.round(Number(scoreResult?.fit_score ?? scoreResult?.score ?? 0))));
@@ -131,10 +181,156 @@ async function supportsScoreHistoryColumns() {
   return scoreHistoryColumnsSupported;
 }
 
+function compactText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function toSearchableText(...parts) {
+  return parts
+    .flat()
+    .map((value) => compactText(value))
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+}
+
+function splitCsv(value) {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function uniqueTerms(values = []) {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function extractMinYears(job) {
+  const explicit = Number(job.years_experience_min || job.min_years_experience || 0);
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+
+  const haystack = toSearchableText(job.job_title, job.full_job_description, job.candidate_profile);
+  const plusMatch = haystack.match(/(\d+)\s*\+\s*years?/);
+  if (plusMatch) return Number(plusMatch[1]);
+  const rangeMatch = haystack.match(/(\d+)\s*[-to]{1,3}\s*(\d+)\s*years?/);
+  if (rangeMatch) return Number(rangeMatch[1]);
+  return 0;
+}
+
+function deriveRequiredSignals(job) {
+  const haystack = toSearchableText(job.job_title, job.sector, job.tech_stack_must, job.candidate_profile, job.full_job_description);
+  for (const rule of ROLE_SIGNAL_RULES) {
+    if (rule.matches.some((term) => haystack.includes(term))) {
+      return rule.requireAny;
+    }
+  }
+
+  const titleTerms = String(job.job_title || '')
+    .toLowerCase()
+    .split(/[^a-z0-9+#]+/)
+    .map((term) => term.trim())
+    .filter((term) => term.length >= 4 && !GENERIC_TITLE_TERMS.has(term));
+
+  const mustHaveTerms = splitCsv(job.tech_stack_must)
+    .map((term) => term.toLowerCase())
+    .filter((term) => term.length >= 3);
+
+  return uniqueTerms([...titleTerms.slice(0, 4), ...mustHaveTerms.slice(0, 4)]);
+}
+
+function buildJobSearchProfile(job) {
+  const minimumYears = extractMinYears(job);
+  const requiredSignals = deriveRequiredSignals(job);
+  const searchGuidance = compactText(getRuntimeConfigValue('RAXION_SOURCING_SEARCH_GUIDANCE', ''));
+  const scoringGuidance = compactText(getRuntimeConfigValue('RAXION_SCORING_GUIDANCE', ''));
+  const seniorityText = compactText(job.seniority_level || '');
+  const isSeniorRole = minimumYears >= 5 || /\b(senior|lead|principal|director|head)\b/i.test(seniorityText) || /\b(senior|lead|principal|director|head)\b/i.test(job.job_title || '');
+
+  return {
+    minimumYears,
+    requiredSignals,
+    isSeniorRole,
+    searchGuidance,
+    scoringGuidance,
+  };
+}
+
+function buildCandidateHaystack(profile) {
+  return toSearchableText(
+    profile.name,
+    profile.current_title,
+    profile.headline,
+    profile.summary,
+    profile.current_company,
+    profile.location,
+    profile.skills,
+    profile.tech_skills,
+    profile.work_experience?.map((item) => `${item.title || ''} ${item.company || ''}`),
+    profile.education?.map((item) => `${item.school || item.name || ''} ${item.degree || ''}`),
+  );
+}
+
+function evaluateCandidateRelevance(profile, job) {
+  const searchProfile = buildJobSearchProfile(job);
+  const haystack = buildCandidateHaystack(profile);
+  const yearsExperience = Number(profile.years_experience || (Array.isArray(profile.work_experience) ? profile.work_experience.length : 0) || 0);
+  const juniorMarker = DISQUALIFYING_JUNIOR_TERMS.find((term) => haystack.includes(term));
+
+  if (searchProfile.isSeniorRole && juniorMarker && yearsExperience < Math.max(3, searchProfile.minimumYears)) {
+    return {
+      accepted: false,
+      reason: `Rejected as likely junior profile due to "${juniorMarker}" for a senior role`,
+    };
+  }
+
+  if (searchProfile.minimumYears >= 5 && yearsExperience > 0 && yearsExperience < searchProfile.minimumYears) {
+    return {
+      accepted: false,
+      reason: `Rejected for insufficient experience (${yearsExperience} years vs ${searchProfile.minimumYears}+ required)`,
+    };
+  }
+
+  if (searchProfile.requiredSignals.length) {
+    const matchedSignals = searchProfile.requiredSignals.filter((term) => haystack.includes(term.toLowerCase()));
+    if (!matchedSignals.length) {
+      return {
+        accepted: false,
+        reason: `Rejected for missing required role signals (${searchProfile.requiredSignals.slice(0, 4).join(', ')})`,
+      };
+    }
+
+    return {
+      accepted: true,
+      matchedSignals,
+      reason: `Matched role signals: ${matchedSignals.join(', ')}`,
+    };
+  }
+
+  return {
+    accepted: true,
+    matchedSignals: [],
+    reason: 'Accepted by default relevance filter',
+  };
+}
+
 async function generateSearchQueries(job) {
+  const searchProfile = buildJobSearchProfile(job);
   const generated = await callClaude(
-    `Generate 3 LinkedIn people search query variations as JSON for this role.\nJob title: ${job.job_title}\nMust-have skills: ${job.tech_stack_must}\nLocation: ${job.location}\nSeniority: ${job.seniority_level}\nSector: ${job.sector}\nRemote policy: ${job.remote_policy}\nReturn {"queries":[{"keywords":"","location":"","network_distance":[1,2]}]}.`,
-    'You generate precise LinkedIn recruiter search inputs. Return valid JSON only.',
+    `Generate 3 LinkedIn people search query variations as JSON for this exact role only.
+Ignore all previous jobs, previous candidates, and any outside context. Use only the job data in this prompt.
+Role must-haves:
+- Job title: ${job.job_title}
+- Must-have skills: ${job.tech_stack_must}
+- Location: ${job.location}
+- Seniority: ${job.seniority_level}
+- Sector: ${job.sector}
+- Remote policy: ${job.remote_policy}
+- Minimum years experience: ${searchProfile.minimumYears || 'not explicitly specified'}
+- Required role signals: ${searchProfile.requiredSignals.join(', ') || 'none'}
+- Reject junior/student/intern profiles: ${searchProfile.isSeniorRole ? 'yes' : 'only if clearly irrelevant'}
+${searchProfile.searchGuidance ? `- Client-specific search guidance: ${searchProfile.searchGuidance}` : ''}
+Return {"queries":[{"keywords":"","location":"","network_distance":[1,2]}]}.`,
+    'You generate precise LinkedIn recruiter search inputs. Use only the current role. Do not generalize from prior jobs. Exclude obviously irrelevant, junior, student, or cross-domain results unless the role explicitly asks for them. Return valid JSON only.',
     { expectJson: true },
   ).then((result) => result.queries || []).catch(() => []);
 
@@ -148,20 +344,22 @@ async function generateSearchQueries(job) {
     .slice(0, 3);
   const seniority = String(job.seniority_level || '').trim();
   const location = String(job.location || '').trim();
+  const roleSignals = searchProfile.requiredSignals.slice(0, 3);
+  const yearsHint = searchProfile.minimumYears >= 5 ? `${searchProfile.minimumYears}+ years` : '';
 
   return [
     {
-      keywords: [seniority, baseTitle, ...mustHaves].filter(Boolean).join(' '),
+      keywords: [seniority, baseTitle, ...roleSignals, ...mustHaves, yearsHint].filter(Boolean).join(' '),
       location,
       network_distance: [1, 2],
     },
     {
-      keywords: [baseTitle, ...mustHaves].filter(Boolean).join(' '),
+      keywords: [baseTitle, ...roleSignals, ...mustHaves].filter(Boolean).join(' '),
       location,
       network_distance: [2, 3],
     },
     {
-      keywords: seniority && baseTitle ? `${seniority} ${baseTitle}` : baseTitle,
+      keywords: [seniority && baseTitle ? `${seniority} ${baseTitle}` : baseTitle, ...roleSignals].filter(Boolean).join(' '),
       location,
       network_distance: [1, 2, 3],
     },
@@ -169,31 +367,48 @@ async function generateSearchQueries(job) {
 }
 
 export async function scoreCandidateAgainstJob(candidateProfile, job) {
+  const searchProfile = buildJobSearchProfile(job);
   const result = await callClaude(
-    `Score this candidate for the role and return JSON.\nRole: ${JSON.stringify(job)}\nCandidate: ${JSON.stringify(candidateProfile)}\nScoring criteria:\n- Tech stack match (35)\n- Seniority fit (20)\n- Location/visa fit (15)\n- Sector/domain experience (15)\n- Overall profile quality (15)\nReturn {"fit_score":0-100,"fit_grade":"HOT|WARM|POSSIBLE|ARCHIVE","fit_rationale":""}.`,
-    'You are a rigorous recruiting evaluator. Return valid JSON only.',
+    `Score this candidate for this exact role only and return JSON.
+Ignore every other job, previous search, previous candidate, and any outside context.
+Role: ${JSON.stringify(job)}
+Candidate: ${JSON.stringify(candidateProfile)}
+Critical requirements:
+- Minimum years experience: ${searchProfile.minimumYears || 'not explicitly specified'}
+- Required role signals: ${searchProfile.requiredSignals.join(', ') || 'none'}
+- Treat obvious students, interns, or adjacent-but-wrong-domain candidates as ARCHIVE for senior roles unless the role explicitly asks for junior talent.
+${searchProfile.scoringGuidance ? `- Client-specific scoring guidance: ${searchProfile.scoringGuidance}` : ''}
+Scoring criteria:
+- Must-have/domain fit (40)
+- Seniority and years experience fit (25)
+- Location/market fit (15)
+- Profile quality and credibility (20)
+Return {"fit_score":0-100,"fit_grade":"HOT|WARM|POSSIBLE|ARCHIVE","fit_rationale":""}.`,
+    'You are a rigorous recruiting evaluator. Use only the current role and current candidate. If the candidate is clearly outside the required domain or far below the role seniority, score harshly and return ARCHIVE. Return valid JSON only.',
     { expectJson: true },
   ).catch(() => null);
 
   if (!result) {
-    const haystack = [
-      candidateProfile.current_title,
-      candidateProfile.headline,
-      candidateProfile.current_company,
-      candidateProfile.skills,
-      candidateProfile.tech_skills,
-      candidateProfile.summary,
-    ].join(' ').toLowerCase();
+    const haystack = buildCandidateHaystack(candidateProfile);
     const titleTerms = String(job.job_title || '').toLowerCase().split(/\s+/).filter((item) => item.length > 3);
     const skillTerms = String(job.tech_stack_must || '').toLowerCase().split(',').map((item) => item.trim()).filter(Boolean);
     const titleMatches = titleTerms.filter((term) => haystack.includes(term)).length;
     const skillMatches = skillTerms.filter((term) => haystack.includes(term)).length;
-    const heuristicScore = Math.min(85, (titleMatches * 18) + (skillMatches * 14));
+    const matchedSignals = searchProfile.requiredSignals.filter((term) => haystack.includes(term));
+    const juniorPenalty = searchProfile.isSeniorRole && DISQUALIFYING_JUNIOR_TERMS.some((term) => haystack.includes(term)) ? 35 : 0;
+    const experiencePenalty = searchProfile.minimumYears >= 5
+      && Number(candidateProfile.years_experience || 0) > 0
+      && Number(candidateProfile.years_experience || 0) < searchProfile.minimumYears
+      ? 25
+      : 0;
+    const heuristicScore = Math.max(0, Math.min(85, (titleMatches * 16) + (skillMatches * 14) + (matchedSignals.length * 18) - juniorPenalty - experiencePenalty));
     const heuristicGrade = heuristicScore >= 80 ? 'HOT' : heuristicScore >= 60 ? 'WARM' : heuristicScore >= 40 ? 'POSSIBLE' : 'ARCHIVE';
     return {
       fit_score: heuristicScore,
       fit_grade: heuristicGrade,
-      fit_rationale: heuristicScore ? `Heuristic fallback score based on title/skill matches (${titleMatches} title, ${skillMatches} skill)` : 'Heuristic fallback found no meaningful title or skill overlap',
+      fit_rationale: heuristicScore
+        ? `Heuristic fallback score based on title/skill/domain overlap (${titleMatches} title, ${skillMatches} skill, ${matchedSignals.length} domain)`
+        : 'Heuristic fallback found no meaningful title, skill, or domain overlap',
     };
   }
 
@@ -280,6 +495,19 @@ export async function sourceCandidatesForJob(jobOrId) {
       await logActivity(job.id, null, 'PROFILE_FALLBACK_USED', `Using search result only for ${result.name || result.full_name || result.id}`, {
         provider_id: result.provider_id || result.id || null,
       });
+    }
+    const relevance = evaluateCandidateRelevance(mergedProfile, job);
+    if (!relevance.accepted) {
+      // eslint-disable-next-line no-await-in-loop
+      await logActivity(job.id, null, 'SEARCH_RESULT_REJECTED', `${mergedProfile.name || result.name || 'Candidate'} rejected before save: ${relevance.reason}`, {
+        provider_id: mergedProfile.provider_id || result.provider_id || result.id || null,
+        current_title: mergedProfile.current_title || mergedProfile.headline || null,
+        current_company: mergedProfile.current_company || null,
+        reason: relevance.reason,
+      });
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(300);
+      continue;
     }
     // eslint-disable-next-line no-await-in-loop
     const scoring = await scoreCandidateAgainstJob(mergedProfile, job);

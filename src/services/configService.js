@@ -27,6 +27,8 @@ export const CONFIG_FIELDS = [
   { key: 'RAXION_SOURCING_PIPELINE_TARGET', label: 'Pipeline Target', secret: false, restartRequired: false, category: 'Orchestration', inputType: 'number', description: 'Top up sourcing when pre-outreach candidates fall below this count.' },
   { key: 'RAXION_SOURCING_SHORTLIST_TARGET', label: 'Shortlist Target', secret: false, restartRequired: false, category: 'Orchestration', inputType: 'number', description: 'Top up sourcing when shortlisted candidates fall below this count.' },
   { key: 'RAXION_SOURCING_COOLDOWN_HOURS', label: 'Sourcing Cooldown Hours', secret: false, restartRequired: false, category: 'Orchestration', inputType: 'number', description: 'Minimum hours between automatic sourcing runs for the same job.' },
+  { key: 'RAXION_SOURCING_SEARCH_GUIDANCE', label: 'Search Guidance', secret: false, restartRequired: false, category: 'Orchestration', inputType: 'text', description: 'Optional extra instructions for candidate search generation, specific to this client or vertical.' },
+  { key: 'RAXION_SCORING_GUIDANCE', label: 'Scoring Guidance', secret: false, restartRequired: false, category: 'Orchestration', inputType: 'text', description: 'Optional extra instructions for candidate scoring, specific to this client or vertical.' },
 ];
 
 function settingKey(key) {
