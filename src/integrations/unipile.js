@@ -22,7 +22,15 @@ function withQuery(path, params = {}) {
   const baseUrl = getBaseUrl();
   const url = new URL(`${baseUrl}${path}`);
   Object.entries(params).forEach(([key, value]) => {
-    if (value != null && value !== '') url.searchParams.set(key, String(value));
+    if (value == null || value === '') return;
+    if (Array.isArray(value)) {
+      value
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+        .forEach((item) => url.searchParams.append(key, item));
+      return;
+    }
+    url.searchParams.set(key, String(value));
   });
   return url;
 }
@@ -160,7 +168,7 @@ export async function getLinkedInProfile(providerId) {
   return request(`/users/${encodeURIComponent(providerId)}`, {
     query: {
       account_id: linkedinAccountId,
-      linkedin_sections: '*_preview,skills,experience',
+      linkedin_sections: ['*_preview', 'skills', 'experience'],
       notify: false,
     },
   });

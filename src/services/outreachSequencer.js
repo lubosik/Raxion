@@ -26,6 +26,28 @@ async function draftMessage(prompt) {
   return callClaude(prompt, 'You write concise, warm recruiter outreach. Return plain text only.').catch(() => null);
 }
 
+async function notifyDraftFailure(job, candidate, channel, stage) {
+  await logActivityOncePerWindow(
+    job.id,
+    candidate.id,
+    'MESSAGE_DRAFT_ERROR',
+    `Failed to draft ${channel} for ${candidate.name}`,
+    {
+      channel,
+      stage,
+      candidate_name: candidate.name,
+      job_title: job.job_title,
+      reason: 'Claude returned no draft response',
+    },
+    60,
+  );
+
+  await sendTelegramMessage(
+    getRecruiterChatId(),
+    `⚠️ Draft failed for ${candidate.name} on ${job.job_title} (${channel}). No approval was queued. Check Claude credits/runtime and retry.`,
+  ).catch(() => null);
+}
+
 async function incrementDailyLimit(jobId, channel) {
   const limits = await ensureDailyLimits(jobId);
   if (!limits) return;
@@ -130,7 +152,11 @@ async function draftFirstDMs(job) {
   for (const candidate of candidates || []) {
     // eslint-disable-next-line no-await-in-loop
     const message = await draftMessage(buildTemplateAwarePrompt(job, 'linkedin_dm', `Write a personalized LinkedIn DM.\nCandidate: ${JSON.stringify(candidate)}\nJob: ${JSON.stringify(job)}\nReference something specific from their profile and mention salary if present.`));
-    if (!message) continue;
+    if (!message) {
+      // eslint-disable-next-line no-await-in-loop
+      await notifyDraftFailure(job, candidate, 'linkedin_dm', 'dm_sent');
+      continue;
+    }
     // eslint-disable-next-line no-await-in-loop
     const approval = await queueApproval({
       candidateId: candidate.id,

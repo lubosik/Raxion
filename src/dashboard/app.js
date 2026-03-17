@@ -201,6 +201,10 @@
     return state.jobCandidates[jobId] || [];
   }
 
+  function isShortlistedCandidate(candidate) {
+    return Number(candidate?.fit_score || 0) >= 60 && !['Archived', 'Rejected', 'Withdrawn'].includes(candidate?.pipeline_stage);
+  }
+
   function candidateStageCounts(candidates) {
     const counts = {};
     for (const candidate of candidates || []) {
@@ -215,7 +219,7 @@
     const counts = candidateStageCounts(candidates);
     return {
       sourced: counts.Sourced || 0,
-      shortlisted: counts.Shortlisted || 0,
+      shortlisted: candidates.filter(isShortlistedCandidate).length,
       outreach: (counts.invite_sent || 0) + (counts.invite_accepted || 0) + (counts.dm_sent || 0) + (counts.email_sent || 0),
       replies: (counts.Replied || 0) + (counts.Qualified || 0),
     };
@@ -515,7 +519,7 @@
     if (!job) return '<div class="empty-state">Select a job to inspect the pipeline.</div>';
 
     const all = state.selectedJobCandidates || [];
-    const shortlisted = all.filter((candidate) => Number(candidate.fit_score || 0) >= 60);
+    const shortlisted = all.filter(isShortlistedCandidate);
     const ranked = [...all].sort((a, b) => Number(b.fit_score || 0) - Number(a.fit_score || 0));
     const outreach = all.filter((candidate) => ['invite_sent', 'invite_accepted', 'dm_sent', 'email_sent'].includes(candidate.pipeline_stage));
     const replies = all.filter((candidate) => ['Replied', 'Qualified'].includes(candidate.pipeline_stage));
