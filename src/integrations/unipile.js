@@ -18,6 +18,13 @@ function getEmailAccountId() {
   return getRuntimeConfigValue('UNIPILE_EMAIL_ACCOUNT_ID');
 }
 
+function normalizeServerBaseUrl(rawValue) {
+  const value = String(rawValue || '').trim().replace(/\/+$/, '');
+  if (!value) return null;
+  if (/^https?:\/\//i.test(value)) return value;
+  return `https://${value}`;
+}
+
 function withQuery(path, params = {}) {
   const baseUrl = getBaseUrl();
   const url = new URL(`${baseUrl}${path}`);
@@ -341,7 +348,7 @@ export async function getSearchParameters(type, keywords) {
 }
 
 export async function setupWebhooks() {
-  const serverBaseUrl = getRuntimeConfigValue('SERVER_BASE_URL');
+  const serverBaseUrl = normalizeServerBaseUrl(getRuntimeConfigValue('SERVER_BASE_URL'));
   const linkedinAccountId = getLinkedinAccountId();
   if (!serverBaseUrl) {
     console.warn('[unipile] skipping webhook setup: SERVER_BASE_URL is not configured');

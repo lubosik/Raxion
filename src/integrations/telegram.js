@@ -14,18 +14,28 @@ async function sendTelegramRequest(method, payload) {
     throw new Error('Missing TELEGRAM_BOT_TOKEN.');
   }
 
-  const response = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-
-  if (!response.ok) {
+  const send = async (requestPayload) => {
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestPayload),
+    });
     const body = await response.text();
-    throw new Error(`Telegram API ${response.status}: ${body}`);
+    return { ok: response.ok, status: response.status, body };
+  };
+
+  let result = await send(payload);
+  if (!result.ok && payload.parse_mode && result.status === 400) {
+    const fallbackPayload = { ...payload };
+    delete fallbackPayload.parse_mode;
+    result = await send(fallbackPayload);
   }
 
-  return response.json();
+  if (!result.ok) {
+    throw new Error(`Telegram API ${result.status}: ${result.body}`);
+  }
+
+  return JSON.parse(result.body);
 }
 
 export async function sendTelegramMessage(chatId, message, options = {}) {

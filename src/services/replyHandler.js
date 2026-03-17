@@ -50,33 +50,71 @@ async function getRemoteConversationHistory(chatId) {
   }));
 }
 
+function uniqueNonEmpty(values) {
+  return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))];
+}
+
+function extractSenderProviderIds(payload) {
+  return uniqueNonEmpty([
+    payload.sender?.attendee_provider_id,
+    payload.sender?.provider_id,
+    payload.attendee_provider_id,
+    payload.sender_id,
+    ...(payload.attendees || []).map((attendee) => attendee?.attendee_provider_id || attendee?.provider_id),
+  ]);
+}
+
+function extractMessageId(payload) {
+  return payload.message_id || payload.data?.message_id || payload.provider_message_id || payload.id || payload.provider_id || null;
+}
+
 export async function processIncomingMessage(webhookPayload) {
   const chatId = webhookPayload.chat_id || webhookPayload.data?.chat_id || null;
-  const senderProviderId = webhookPayload.sender?.attendee_provider_id || webhookPayload.sender?.provider_id || webhookPayload.attendee_provider_id || null;
+  const senderProviderIds = extractSenderProviderIds(webhookPayload);
   const senderEmail = webhookPayload.from_attendee?.identifier || webhookPayload.sender_email || null;
   const messageText = webhookPayload.text || webhookPayload.message_text || webhookPayload.data?.text || '';
   const attachments = webhookPayload.attachments || webhookPayload.data?.attachments || [];
   const timestamp = webhookPayload.timestamp || new Date().toISOString();
-  const messageId = webhookPayload.message_id || webhookPayload.data?.message_id || null;
+  const messageId = extractMessageId(webhookPayload);
   const channel = webhookPayload.channel || webhookPayload.source_channel || 'linkedin_dm';
+
+  if (!messageText.trim() && !attachments.length) {
+    return null;
+  }
+
+  if (messageId) {
+    const { data: existingConversation } = await supabase
+      .from('conversations')
+      .select('id')
+      .eq('unipile_message_id', messageId)
+      .limit(1)
+      .maybeSingle();
+    if (existingConversation) {
+      return null;
+    }
+  }
 
   let candidateQuery = supabase
     .from('candidates')
     .select('*')
     .limit(1);
 
-  if (chatId || senderProviderId || senderEmail) {
+  if (chatId || senderProviderIds.length || senderEmail) {
     const filters = [];
     if (chatId) filters.push(`unipile_chat_id.eq.${chatId}`);
-    if (senderProviderId) filters.push(`linkedin_provider_id.eq.${senderProviderId}`);
+    for (const senderProviderId of senderProviderIds) {
+      filters.push(`linkedin_provider_id.eq.${senderProviderId}`);
+    }
     if (senderEmail) filters.push(`email.eq.${senderEmail}`);
-    candidateQuery = candidateQuery.or(filters.join(','));
+    if (filters.length) {
+      candidateQuery = candidateQuery.or(filters.join(','));
+    }
   }
 
   const { data: candidate } = await candidateQuery.maybeSingle();
 
   if (!candidate) {
-    console.warn('[replyHandler] unknown incoming message', { chatId, senderProviderId, senderEmail });
+    console.warn('[replyHandler] unknown incoming message', { chatId, senderProviderIds, senderEmail, messageId });
     return null;
   }
 

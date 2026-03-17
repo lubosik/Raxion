@@ -103,6 +103,23 @@ async function syncApprovalTelegramCard(approval) {
   ).catch(() => null);
 }
 
+async function deliverApprovalTelegramCard(approval, candidate, job) {
+  const normalizedApproval = normalizeApprovalRecord(approval);
+  const telegramResponse = await sendTelegramMessage(
+    getRecruiterChatId(),
+    approvalMessage(candidate, job, normalizedApproval),
+    { reply_markup: approvalReplyMarkup(normalizedApproval.id, normalizedApproval.status) },
+  );
+
+  if (telegramResponse?.result?.message_id) {
+    await supabase.from('approval_queue').update(await prepareApprovalUpdatePayload({
+      telegram_message_id: String(telegramResponse.result.message_id),
+    })).eq('id', normalizedApproval.id);
+  }
+
+  return telegramResponse;
+}
+
 async function getApprovalContext(approval) {
   const [{ data: candidate }, { data: job }] = await Promise.all([
     supabase.from('candidates').select('*').eq('id', approval.candidate_id).single(),
@@ -261,15 +278,14 @@ export async function queueApproval({ candidateId, jobId, messageText, channel, 
   if (error || !approval) return null;
   const normalizedApproval = normalizeApprovalRecord(approval);
 
-  const telegramResponse = await sendTelegramMessage(
-    getRecruiterChatId(),
-    approvalMessage(candidate, normalizedJob, approval),
-    { reply_markup: approvalReplyMarkup(normalizedApproval.id, normalizedApproval.status) },
-  ).catch(() => null);
-  if (telegramResponse?.result?.message_id) {
-    await supabase.from('approval_queue').update(await prepareApprovalUpdatePayload({
-      telegram_message_id: String(telegramResponse.result.message_id),
-    })).eq('id', approval.id);
+  try {
+    await deliverApprovalTelegramCard(normalizedApproval, candidate, normalizedJob);
+  } catch (error) {
+    await logActivity(jobId, candidateId, 'TELEGRAM_APPROVAL_NOTIFY_FAILED', `Telegram approval notification failed: ${error.message}`, {
+      approval_id: normalizedApproval.id,
+      channel,
+      stage,
+    });
   }
 
   await logActivity(jobId, candidateId, 'MESSAGE_DRAFTED', `Drafted ${channel} and queued for approval`, {
@@ -278,6 +294,40 @@ export async function queueApproval({ candidateId, jobId, messageText, channel, 
     stage,
   });
   return normalizedApproval;
+}
+
+export async function resendMissingTelegramApprovalCards(limit = 25) {
+  const { data: approvals } = await supabase
+    .from('approval_queue')
+    .select('*')
+    .in('status', ['pending', 'edited', 'approved'])
+    .is('telegram_message_id', null)
+    .order('created_at', { ascending: true })
+    .limit(limit);
+
+  let resent = 0;
+
+  for (const approval of approvals || []) {
+    const normalizedApproval = normalizeApprovalRecord(approval);
+    // eslint-disable-next-line no-await-in-loop
+    const { candidate, job } = await getApprovalContext(normalizedApproval);
+    if (!candidate || !job) continue;
+
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      await deliverApprovalTelegramCard(normalizedApproval, candidate, job);
+      resent += 1;
+    } catch (error) {
+      // eslint-disable-next-line no-await-in-loop
+      await logActivity(normalizedApproval.job_id, normalizedApproval.candidate_id, 'TELEGRAM_APPROVAL_NOTIFY_FAILED', `Telegram approval resend failed: ${error.message}`, {
+        approval_id: normalizedApproval.id,
+        channel: normalizedApproval.channel,
+        resend: true,
+      });
+    }
+  }
+
+  return resent;
 }
 
 export async function approveQueuedMessage(approvalId) {
