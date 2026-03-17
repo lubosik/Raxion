@@ -889,6 +889,7 @@
     const runtime = state.runtime || {};
     const health = state.health || {};
     const integrationHealth = health.integration_health || { statuses: [], checked_at: null };
+    const executionQueue = health.execution_queue || { active: [], pending: [], concurrency: 1, running: false };
     const toggles = [
       ['outreachEnabled', 'Outreach'],
       ['followupEnabled', 'Follow-up'],
@@ -910,9 +911,17 @@
           `<div class="metric-card strip-card"><div class="metric-number">${esc(runtime.raxionStatus || 'ACTIVE')}</div><div class="metric-caption">System Status</div></div>` +
           `<div class="metric-card strip-card"><div class="metric-number">${health.pending_approvals || 0}</div><div class="metric-caption">Pending Approvals</div></div>` +
           `<div class="metric-card strip-card"><div class="metric-number">${health.webhook_events_logged || 0}</div><div class="metric-caption">Webhook Events</div></div>` +
+          `<div class="metric-card strip-card"><div class="metric-number">${executionQueue.active?.length || 0}/${executionQueue.concurrency || 1}</div><div class="metric-caption">Active Jobs</div></div>` +
+          `<div class="metric-card strip-card"><div class="metric-number">${executionQueue.pending?.length || 0}</div><div class="metric-caption">Queued Jobs</div></div>` +
           `<div class="metric-card strip-card"><div class="metric-number metric-small">${esc(formatTime(health.server_time))}</div><div class="metric-caption">Server Time</div></div>` +
         '</div>' +
         '<div class="jobs-grid">' + toggles.map(([key, label]) => `<div class="surface toggle-surface"><div><div class="label-caps">Module</div><h3 class="section-title small">${esc(label)}</h3></div><button class="toggle-switch ${runtime[key] ? 'is-on' : ''}" data-action="toggle-runtime" data-id="${esc(key)}"><span></span></button></div>`).join('') + '</div>' +
+        '<div class="surface"><div class="section-head"><div><div class="label-caps">Execution Queue</div><h2 class="section-title">Job Scheduler</h2></div></div><div class="job-snapshot-grid">' +
+          `<div class="snapshot-card"><div class="candidate-sub">Running</div><strong>${esc(executionQueue.running ? 'Yes' : 'No')}</strong></div>` +
+          `<div class="snapshot-card"><div class="candidate-sub">Concurrency</div><strong>${esc(executionQueue.concurrency || 1)}</strong></div>` +
+          `<div class="snapshot-card"><div class="candidate-sub">Active</div><strong>${esc((executionQueue.active || []).map((item) => item.job_title).join(', ') || 'None')}</strong></div>` +
+          `<div class="snapshot-card"><div class="candidate-sub">Pending</div><strong>${esc((executionQueue.pending || []).map((item) => item.job_title).join(', ') || 'None')}</strong></div>` +
+        '</div></div>' +
         '<div class="surface"><div class="section-head"><div><div class="label-caps">API Health</div><h2 class="section-title">Integration Status</h2></div><button class="btn btn-secondary btn-sm" data-action="refresh-health">Refresh</button></div><div class="health-grid">' + (integrationHealth.statuses || []).map((item) => `<div class="health-card"><div class="health-head"><span class="health-dot ${esc(item.status)}"></span><strong>${esc(item.name)}</strong></div><div class="candidate-sub">${esc(item.detail || '')}</div></div>`).join('') + '</div></div>' +
         '<div class="surface"><div class="section-head"><div><div class="label-caps">Environment</div><h2 class="section-title">Runtime Config</h2></div></div><div class="view-section">' + Object.entries(groupedConfig).map(([category, fields]) => (
           '<section class="config-group">' +

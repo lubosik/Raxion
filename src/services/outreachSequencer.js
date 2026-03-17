@@ -13,6 +13,7 @@ import { getChannelWindow, isWithinSendingWindow } from './scheduleService.js';
 import { buildTemplateAwarePrompt, parseTemplates } from './outreachTemplates.js';
 import { normalizeJobRecord } from './dbCompat.js';
 import { draftApplicantReply, fetchAndProcessApplicants, notifyTeamOfShortlist } from './inboundApplicantService.js';
+import { processJobsWithQueue, runSerializedOrchestratorCycle } from './jobExecutionQueue.js';
 
 async function ensureDailyLimits(jobId) {
   const { data } = await supabase
@@ -378,7 +379,7 @@ export async function runJobCycle(job, runtimeState) {
   await checkStuckStages(normalizedJob);
 }
 
-export async function runOrchestratorCycle() {
+async function executeOrchestratorCycle() {
   const runtimeState = await getRuntimeState();
   if (runtimeState.raxionStatus !== 'ACTIVE' || runtimeState.outreachPausedUntil && new Date(runtimeState.outreachPausedUntil).getTime() > Date.now()) {
     return { processed: 0, skipped: true };
@@ -390,22 +391,21 @@ export async function runOrchestratorCycle() {
     .eq('status', 'ACTIVE')
     .order('created_at', { ascending: true });
 
-  let processed = 0;
-  for (const rawJob of jobs || []) {
-    const job = normalizeJobRecord(rawJob);
-    if (job.paused) continue;
+  const runnableJobs = (jobs || []).map(normalizeJobRecord).filter((job) => !job.paused);
+  const result = await processJobsWithQueue(runnableJobs, async (job) => {
     try {
-      // eslint-disable-next-line no-await-in-loop
       await runJobCycle(job, runtimeState);
-      processed += 1;
-      // eslint-disable-next-line no-await-in-loop
       await sleep(2000);
     } catch (error) {
-      // eslint-disable-next-line no-await-in-loop
       await logActivity(job.id, null, 'ORCHESTRATOR_ERROR', error.message, {});
       console.error(`[outreachSequencer] orchestrator error for job ${job.id}`, error);
+      throw error;
     }
-  }
+  });
 
-  return { processed };
+  return result;
+}
+
+export async function runOrchestratorCycle(reason = 'scheduled') {
+  return runSerializedOrchestratorCycle(reason, executeOrchestratorCycle);
 }

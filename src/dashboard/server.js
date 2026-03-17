@@ -21,6 +21,7 @@ import { listRuntimeConfig, setRuntimeConfigValue, deleteRuntimeConfigValue } fr
 import { getIntegrationHealth } from '../services/healthService.js';
 import { getSetting, setSetting } from '../services/settings.js';
 import { markConversationEnded } from '../services/conversationState.js';
+import { getExecutionQueueSnapshot } from '../services/jobExecutionQueue.js';
 import {
   normalizeApprovalRecord,
   normalizeCandidateRecord,
@@ -232,6 +233,7 @@ export function createDashboardServer() {
       webhook_events_logged: webhookCount || 0,
       server_time: new Date().toISOString(),
       integration_health: integrationHealth,
+      execution_queue: getExecutionQueueSnapshot(),
     });
   });
 
