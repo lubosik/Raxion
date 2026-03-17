@@ -12,7 +12,7 @@ import {
 } from './dbCompat.js';
 import { isWithinSendingWindow } from './scheduleService.js';
 import { ensureSignedMessage } from './outreachTemplates.js';
-import { isConversationEnded } from './conversationState.js';
+import { isConversationEnded, markConversationEnded } from './conversationState.js';
 
 const UNSENT_APPROVAL_STATUSES = ['pending', 'edited', 'approved'];
 
@@ -176,7 +176,12 @@ async function applyStageAfterSend(approval, candidate, result) {
   const updates = {};
   const now = new Date().toISOString();
 
-  if (normalizedApproval.channel === 'linkedin_dm') {
+  if (normalizedApproval.stage === 'Archived') {
+    Object.assign(updates, markConversationEnded(candidate, 'Conversation closed after final reply', { archive: true }));
+    if (normalizedApproval.channel === 'linkedin_dm') {
+      updates.dm_sent_at = now;
+    }
+  } else if (normalizedApproval.channel === 'linkedin_dm') {
     updates.pipeline_stage = normalizedApproval.stage || 'dm_sent';
     updates.dm_sent_at = now;
     updates.unipile_chat_id = result?.chat_id || candidate.unipile_chat_id;

@@ -181,6 +181,8 @@ export async function processIncomingMessage(webhookPayload) {
   }
 
   const classification = await classifyReply(candidate, job, fullConversationHistory, messageText);
+  const archiveReason = classification.end_reason || classification.concerns || 'Archived after reply classification';
+  const shouldQueueArchiveReply = classification.next_action === 'archive' && String(classification.suggested_reply || '').trim();
 
   if (classification.intent === 'booking_confirmed') {
     await supabase.from('candidates').update({
@@ -192,15 +194,26 @@ export async function processIncomingMessage(webhookPayload) {
       reason: classification.end_reason || 'Meeting booked',
       automatic: true,
     });
-  } else if (classification.next_action === 'archive') {
+  } else if (classification.next_action === 'archive' && !shouldQueueArchiveReply) {
     await supabase.from('candidates').update(markConversationEnded(
       candidate,
-      classification.end_reason || classification.concerns || 'Archived after reply classification',
+      archiveReason,
       { archive: true },
     )).eq('id', candidate.id);
     await logActivity(candidate.job_id, candidate.id, 'CHAT_ENDED', `${candidate.name} conversation ended and archived`, {
-      reason: classification.end_reason || classification.concerns || 'Archived after reply classification',
+      reason: archiveReason,
       automatic: true,
+    });
+  } else if (classification.next_action === 'archive' && shouldQueueArchiveReply) {
+    await supabase.from('candidates').update({
+      pipeline_stage: 'Replied',
+      follow_up_due_at: null,
+      ...clearEndChatRecommendation(candidate),
+    }).eq('id', candidate.id);
+    await logActivity(candidate.job_id, candidate.id, 'CHAT_END_RECOMMENDED', `${candidate.name} close-out reply queued before archive`, {
+      reason: archiveReason,
+      intent: classification.intent,
+      final_reply_pending: true,
     });
   } else if (classification.should_end_conversation) {
     await supabase.from('candidates').update(markEndChatRecommended(
@@ -246,9 +259,17 @@ export async function processIncomingMessage(webhookPayload) {
       messageText: ensureSignedMessage(job, classification.suggested_reply),
     });
   } else if (classification.next_action === 'archive') {
-    await logActivity(candidate.job_id, candidate.id, 'CANDIDATE_ARCHIVED', `${candidate.name} archived after reply`, {
+    await queueApproval({
+      candidateId: candidate.id,
+      jobId: candidate.job_id,
+      channel: 'linkedin_dm',
+      stage: 'Archived',
+      messageText: ensureSignedMessage(job, classification.suggested_reply),
+    });
+    await logActivity(candidate.job_id, candidate.id, 'CANDIDATE_ARCHIVED', `${candidate.name} marked for archive after final reply`, {
       intent: classification.intent,
       concerns: classification.concerns,
+      final_reply_pending: true,
     });
   } else if (classification.next_action === 'escalate') {
     await sendTelegramMessage(getRecruiterChatId(), `💬 ${candidate.name} replied and needs manual recruiter handling for ${job.job_title}`).catch(() => null);
