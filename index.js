@@ -12,8 +12,6 @@ import { logError } from './src/lib_errors.js';
 import { setupWebhooks } from './src/integrations/unipile.js';
 import { ensureSchemaReady } from './src/services/schemaService.js';
 import { hydrateRuntimeConfig } from './src/services/configService.js';
-import { fetchAndProcessApplicants } from './src/services/inboundApplicantService.js';
-import { normalizeJobRecord } from './src/services/dbCompat.js';
 
 const port = Number(process.env.PORT || 3001);
 const app = express();
@@ -37,11 +35,7 @@ async function testSupabase() {
 function registerCronJobs() {
   cron.schedule('0 7 * * *', async () => {
     try {
-      const { data: jobs } = await supabase.from('jobs').select('*').in('job_mode', ['inbound', 'both']).eq('status', 'ACTIVE');
-      for (const rawJob of jobs || []) {
-        // eslint-disable-next-line no-await-in-loop
-        await fetchAndProcessApplicants(normalizeJobRecord(rawJob));
-      }
+      await runOrchestratorCycle('daily-inbound-scan');
       console.log('[raxion] inbound applicant fetch complete');
     } catch (error) {
       await logError('index.inboundApplicantCron', error, 'error');
@@ -50,7 +44,7 @@ function registerCronJobs() {
 
   cron.schedule('*/15 * * * *', async () => {
     try {
-      await runOrchestratorCycle();
+      await runOrchestratorCycle('scheduled');
       console.log('[raxion] orchestrator cycle complete');
     } catch (error) {
       await logError('index.sequencerCron', error, 'critical');

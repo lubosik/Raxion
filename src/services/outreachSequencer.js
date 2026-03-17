@@ -13,7 +13,13 @@ import { getChannelWindow, isWithinSendingWindow } from './scheduleService.js';
 import { buildTemplateAwarePrompt, parseTemplates } from './outreachTemplates.js';
 import { normalizeJobRecord } from './dbCompat.js';
 import { draftApplicantReply, fetchAndProcessApplicants, notifyTeamOfShortlist } from './inboundApplicantService.js';
-import { processJobsWithQueue, runSerializedOrchestratorCycle } from './jobExecutionQueue.js';
+import {
+  enqueueJobsForExecution,
+  processDistributedJobQueue,
+  processJobsWithQueue,
+  runSerializedOrchestratorCycle,
+  supportsDistributedExecutionQueue,
+} from './jobExecutionQueue.js';
 
 async function ensureDailyLimits(jobId) {
   const { data } = await supabase
@@ -379,7 +385,7 @@ export async function runJobCycle(job, runtimeState) {
   await checkStuckStages(normalizedJob);
 }
 
-async function executeOrchestratorCycle() {
+async function executeLocalOrchestratorCycle() {
   const runtimeState = await getRuntimeState();
   if (runtimeState.raxionStatus !== 'ACTIVE' || runtimeState.outreachPausedUntil && new Date(runtimeState.outreachPausedUntil).getTime() > Date.now()) {
     return { processed: 0, skipped: true };
@@ -406,6 +412,40 @@ async function executeOrchestratorCycle() {
   return result;
 }
 
+async function executeDistributedOrchestratorCycle(reason) {
+  const runtimeState = await getRuntimeState();
+  if (runtimeState.raxionStatus !== 'ACTIVE' || runtimeState.outreachPausedUntil && new Date(runtimeState.outreachPausedUntil).getTime() > Date.now()) {
+    return { processed: 0, skipped: true };
+  }
+
+  const { data: jobs } = await supabase
+    .from('jobs')
+    .select('*')
+    .eq('status', 'ACTIVE')
+    .order('created_at', { ascending: true });
+
+  const runnableJobs = (jobs || []).map(normalizeJobRecord).filter((job) => !job.paused);
+  await enqueueJobsForExecution(runnableJobs, reason);
+
+  return processDistributedJobQueue(async (queueItem) => {
+    const { data: rawJob } = await supabase.from('jobs').select('*').eq('id', queueItem.job_id).single();
+    const job = normalizeJobRecord(rawJob);
+    if (!job || job.paused || job.status !== 'ACTIVE') return;
+
+    try {
+      await runJobCycle(job, runtimeState);
+      await sleep(2000);
+    } catch (error) {
+      await logActivity(job.id, null, 'ORCHESTRATOR_ERROR', error.message, {});
+      console.error(`[outreachSequencer] distributed orchestrator error for job ${job.id}`, error);
+      throw error;
+    }
+  });
+}
+
 export async function runOrchestratorCycle(reason = 'scheduled') {
-  return runSerializedOrchestratorCycle(reason, executeOrchestratorCycle);
+  if (await supportsDistributedExecutionQueue()) {
+    return executeDistributedOrchestratorCycle(reason);
+  }
+  return runSerializedOrchestratorCycle(reason, executeLocalOrchestratorCycle);
 }

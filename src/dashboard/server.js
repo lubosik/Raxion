@@ -219,11 +219,12 @@ export function createDashboardServer() {
   });
 
   app.get('/api/health', async (req, res) => {
-    const [{ count: webhookCount }, { count: queueCount }, state, integrationHealth] = await Promise.all([
+    const [{ count: webhookCount }, { count: queueCount }, state, integrationHealth, executionQueue] = await Promise.all([
       supabase.from('webhook_logs').select('*', { count: 'exact', head: true }),
       supabase.from('approval_queue').select('*', { count: 'exact', head: true }).in('status', ['pending', 'edited']),
       getRuntimeState(),
       getIntegrationHealth(req.query.refresh === 'true'),
+      getExecutionQueueSnapshot(),
     ]);
 
     res.json({
@@ -233,7 +234,7 @@ export function createDashboardServer() {
       webhook_events_logged: webhookCount || 0,
       server_time: new Date().toISOString(),
       integration_health: integrationHealth,
-      execution_queue: getExecutionQueueSnapshot(),
+      execution_queue: executionQueue,
     });
   });
 
