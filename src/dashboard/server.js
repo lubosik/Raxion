@@ -1,4 +1,5 @@
 import express from 'express';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import supabase from '../db/supabase.js';
@@ -12,6 +13,7 @@ import { generateInterviewBrief } from '../services/qualificationEngine.js';
 import { getRuntimeState, toggleRuntimeStateValue } from '../services/runtimeState.js';
 import { listRuntimeConfig, setRuntimeConfigValue, deleteRuntimeConfigValue } from '../services/configService.js';
 import { getIntegrationHealth } from '../services/healthService.js';
+import { getSetting } from '../services/settings.js';
 import {
   normalizeApprovalRecord,
   normalizeConversationRecord,
@@ -21,6 +23,11 @@ import {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const DEFAULT_MISSION_CONTROL_USERNAME = 'lubosi@libdr.com';
+const DEFAULT_MISSION_CONTROL_PASSWORD = 'G00dluck!';
+
+let cachedMissionControlAuth;
+let cachedMissionControlAuthAt = 0;
 
 function htmlPage() {
   return `<!doctype html>
@@ -74,8 +81,64 @@ async function getJobWithMetrics(job) {
   return { ...normalized, metrics: await fetchJobMetrics(normalized.id) };
 }
 
+function secureCompare(left, right) {
+  const leftBuffer = Buffer.from(String(left || ''));
+  const rightBuffer = Buffer.from(String(right || ''));
+  if (leftBuffer.length !== rightBuffer.length) return false;
+  return crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+async function getMissionControlAuth() {
+  if (cachedMissionControlAuth && Date.now() - cachedMissionControlAuthAt < 60_000) {
+    return cachedMissionControlAuth;
+  }
+
+  const [username, password] = await Promise.all([
+    getSetting('mission_control_username', process.env.MISSION_CONTROL_USERNAME || DEFAULT_MISSION_CONTROL_USERNAME),
+    getSetting('mission_control_password', process.env.MISSION_CONTROL_PASSWORD || DEFAULT_MISSION_CONTROL_PASSWORD),
+  ]);
+
+  cachedMissionControlAuth = {
+    username: username || DEFAULT_MISSION_CONTROL_USERNAME,
+    password: password || DEFAULT_MISSION_CONTROL_PASSWORD,
+  };
+  cachedMissionControlAuthAt = Date.now();
+  return cachedMissionControlAuth;
+}
+
+async function requireMissionControlAuth(req, res, next) {
+  const header = req.headers.authorization || '';
+  const [scheme, encoded] = header.split(' ');
+
+  if (scheme !== 'Basic' || !encoded) {
+    res.set('WWW-Authenticate', 'Basic realm="Raxion Mission Control"');
+    return res.status(401).send('Authentication required');
+  }
+
+  let decoded = '';
+  try {
+    decoded = Buffer.from(encoded, 'base64').toString('utf8');
+  } catch {
+    res.set('WWW-Authenticate', 'Basic realm="Raxion Mission Control"');
+    return res.status(401).send('Invalid authentication header');
+  }
+
+  const separatorIndex = decoded.indexOf(':');
+  const providedUsername = separatorIndex >= 0 ? decoded.slice(0, separatorIndex) : decoded;
+  const providedPassword = separatorIndex >= 0 ? decoded.slice(separatorIndex + 1) : '';
+  const expected = await getMissionControlAuth();
+
+  if (!secureCompare(providedUsername, expected.username) || !secureCompare(providedPassword, expected.password)) {
+    res.set('WWW-Authenticate', 'Basic realm="Raxion Mission Control"');
+    return res.status(401).send('Invalid credentials');
+  }
+
+  return next();
+}
+
 export function createDashboardServer() {
   const app = express();
+  app.use(requireMissionControlAuth);
   app.use('/dashboard', express.static(__dirname));
 
   app.get('/', async (req, res) => {
