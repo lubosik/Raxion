@@ -1003,6 +1003,9 @@
 
     const actionEl = event.target.closest('[data-action]');
     if (actionEl) {
+      if (actionEl.tagName === 'SELECT') {
+        return;
+      }
       event.preventDefault();
       try {
         await handleAction(
