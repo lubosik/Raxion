@@ -699,6 +699,12 @@
     const candidate = state.candidatePanelDetail;
     if (!candidate) return '';
     const stageOptions = Object.keys(STAGE_META).map((stage) => `<option value="${esc(stage)}"${candidate.pipeline_stage === stage ? ' selected' : ''}>${esc(stageInfo(stage).label)}</option>`).join('');
+    const hasLatestEvaluation = candidate.latest_fit_score != null
+      && (
+        Number(candidate.latest_fit_score) !== Number(candidate.fit_score || 0)
+        || String(candidate.latest_fit_grade || '') !== String(candidate.fit_grade || '')
+        || String(candidate.latest_fit_rationale || '') !== String(candidate.fit_rationale || '')
+      );
     return (
       '<div class="drawer-backdrop" data-action="close-candidate"></div>' +
       '<aside class="drawer">' +
@@ -706,6 +712,9 @@
         '<div class="drawer-body">' +
           '<div class="panel-block"><div class="panel-grid"><div><span class="panel-label">Location</span><strong>' + esc(candidate.location || '—') + '</strong></div><div><span class="panel-label">Score</span>' + scorePill(candidate.fit_score) + '</div><div><span class="panel-label">Stage</span>' + stageChip(candidate.pipeline_stage) + '</div><div><span class="panel-label">Profile</span>' + profileButton(candidate.linkedin_url) + '</div></div></div>' +
           '<div class="panel-block"><div class="panel-label">Fit rationale</div><p>' + esc(candidate.fit_rationale || 'No rationale.') + '</p></div>' +
+          (hasLatestEvaluation
+            ? '<div class="panel-block"><div class="panel-label">Latest Re-evaluation</div><p><strong>' + esc(`${candidate.latest_fit_score}/100 ${candidate.latest_fit_grade || ''}`.trim()) + '</strong></p><p>' + esc(candidate.latest_fit_rationale || 'No latest rationale.') + '</p></div>'
+            : '') +
           '<div class="panel-block"><div class="panel-label">Skills</div><div class="tag-row">' + (String(candidate.tech_skills || '').split(',').map((tag) => tag.trim()).filter(Boolean).map((tag) => `<span class="tag">${esc(tag)}</span>`).join('') || '<span class="muted-inline">No skills captured</span>') + '</div></div>' +
           '<div class="panel-block"><div class="panel-label">Past employers</div><p>' + esc(candidate.past_employers || 'No employer history captured.') + '</p></div>' +
           '<div class="panel-block"><div class="panel-label">Stage change</div><div class="button-row"><select id="candidate-stage-select" class="select">' + stageOptions + '</select><button class="btn btn-primary btn-sm" data-action="save-candidate-stage" data-id="' + esc(candidate.id) + '">Save Stage</button></div></div>' +

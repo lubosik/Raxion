@@ -5,6 +5,8 @@ import { sendTelegramMessage, getRecruiterChatId } from '../integrations/telegra
 import { sleep } from '../lib_utils.js';
 import { logActivity } from './activityLogger.js';
 
+let scoreHistoryColumnsSupported;
+
 function normalizeScoreResult(scoreResult) {
   const fitScore = Math.max(0, Math.min(100, Math.round(Number(scoreResult?.fit_score ?? scoreResult?.score ?? 0))));
   const fitGrade = fitScore >= 80 ? 'HOT' : fitScore >= 60 ? 'WARM' : fitScore >= 40 ? 'POSSIBLE' : 'ARCHIVE';
@@ -41,6 +43,11 @@ function normaliseCandidate(profile, job, scoring, source = 'LinkedIn Search') {
     fit_score: normalizedScore.fit_score,
     fit_grade: normalizedScore.fit_grade,
     fit_rationale: normalizedScore.fit_rationale,
+    latest_fit_score: normalizedScore.fit_score,
+    latest_fit_grade: normalizedScore.fit_grade,
+    latest_fit_rationale: normalizedScore.fit_rationale,
+    latest_scored_at: new Date().toISOString(),
+    best_scored_at: new Date().toISOString(),
     pipeline_stage: pipelineStage,
     enrichment_status: 'Pending',
     source,
@@ -70,15 +77,20 @@ function mergeCandidateWithExisting(existing, incoming) {
 
   const existingScore = Number(existing.fit_score || 0);
   const incomingScore = Number(incoming.fit_score || 0);
-  const preserveExistingScore = existingScore > incomingScore;
+  const preserveExistingBestScore = existingScore > incomingScore;
   const preserveExistingStage = stageRank(existing.pipeline_stage) > stageRank(incoming.pipeline_stage);
 
   return {
     ...incoming,
-    fit_score: preserveExistingScore ? existing.fit_score : incoming.fit_score,
-    fit_grade: preserveExistingScore ? existing.fit_grade : incoming.fit_grade,
-    fit_rationale: preserveExistingScore ? existing.fit_rationale : incoming.fit_rationale,
-    pipeline_stage: preserveExistingStage || preserveExistingScore ? existing.pipeline_stage : incoming.pipeline_stage,
+    latest_fit_score: incoming.fit_score,
+    latest_fit_grade: incoming.fit_grade,
+    latest_fit_rationale: incoming.fit_rationale,
+    latest_scored_at: incoming.latest_scored_at || new Date().toISOString(),
+    fit_score: preserveExistingBestScore ? existing.fit_score : incoming.fit_score,
+    fit_grade: preserveExistingBestScore ? existing.fit_grade : incoming.fit_grade,
+    fit_rationale: preserveExistingBestScore ? existing.fit_rationale : incoming.fit_rationale,
+    best_scored_at: preserveExistingBestScore ? (existing.best_scored_at || existing.created_at || new Date().toISOString()) : (incoming.latest_scored_at || new Date().toISOString()),
+    pipeline_stage: preserveExistingStage || preserveExistingBestScore ? existing.pipeline_stage : incoming.pipeline_stage,
     enrichment_status: existing.enrichment_status || incoming.enrichment_status,
     invite_sent_at: existing.invite_sent_at || incoming.invite_sent_at || null,
     invite_accepted_at: existing.invite_accepted_at || incoming.invite_accepted_at || null,
@@ -86,6 +98,36 @@ function mergeCandidateWithExisting(existing, incoming) {
     last_reply_at: existing.last_reply_at || incoming.last_reply_at || null,
     unipile_chat_id: existing.unipile_chat_id || incoming.unipile_chat_id || null,
   };
+}
+
+function latestDiffersFromBest(candidate) {
+  return candidate?.latest_fit_score != null
+    && (
+      Number(candidate.latest_fit_score) !== Number(candidate.fit_score || 0)
+      || String(candidate.latest_fit_grade || '') !== String(candidate.fit_grade || '')
+      || String(candidate.latest_fit_rationale || '') !== String(candidate.fit_rationale || '')
+    );
+}
+
+function stripScoreHistoryFields(candidate) {
+  const {
+    latest_fit_score,
+    latest_fit_grade,
+    latest_fit_rationale,
+    latest_scored_at,
+    best_scored_at,
+    ...legacyCandidate
+  } = candidate;
+
+  return legacyCandidate;
+}
+
+async function supportsScoreHistoryColumns() {
+  if (typeof scoreHistoryColumnsSupported === 'boolean') return scoreHistoryColumnsSupported;
+
+  const { error } = await supabase.from('candidates').select('latest_fit_score').limit(1);
+  scoreHistoryColumnsSupported = !error;
+  return scoreHistoryColumnsSupported;
 }
 
 async function generateSearchQueries(job) {
@@ -189,6 +231,7 @@ async function getActiveDuplicateProviderIds(jobId, providerIds = []) {
 export async function sourceCandidatesForJob(jobOrId) {
   const job = await getJob(jobOrId);
   if (!job) return { total: 0, hot: 0, warm: 0 };
+  const hasScoreHistory = await supportsScoreHistoryColumns();
 
   const queries = await generateSearchQueries(job);
   const dedupe = new Map();
@@ -248,7 +291,9 @@ export async function sourceCandidatesForJob(jobOrId) {
       .eq('job_id', job.id)
       .eq('linkedin_provider_id', candidate.linkedin_provider_id)
       .maybeSingle();
-    const candidatePayload = mergeCandidateWithExisting(existing, candidate);
+    const candidatePayload = hasScoreHistory
+      ? mergeCandidateWithExisting(existing, candidate)
+      : stripScoreHistoryFields(mergeCandidateWithExisting(existing, candidate));
     // eslint-disable-next-line no-await-in-loop
     const { data } = await supabase.from('candidates').upsert(candidatePayload, {
       onConflict: 'job_id,linkedin_provider_id',
@@ -260,10 +305,14 @@ export async function sourceCandidatesForJob(jobOrId) {
         job.id,
         data.id,
         'CANDIDATE_SOURCED',
-        `${data.name} sourced with score ${data.fit_score || 0}/100 and stage ${data.pipeline_stage}`,
+        latestDiffersFromBest(data)
+          ? `${data.name} re-sourced at ${data.latest_fit_score || 0}/100; best remains ${data.fit_score || 0}/100 (${data.pipeline_stage})`
+          : `${data.name} sourced with score ${data.fit_score || 0}/100 and stage ${data.pipeline_stage}`,
         {
           fit_score: data.fit_score,
           fit_grade: data.fit_grade,
+          latest_fit_score: data.latest_fit_score,
+          latest_fit_grade: data.latest_fit_grade,
           pipeline_stage: data.pipeline_stage,
           current_title: data.current_title,
           current_company: data.current_company,
@@ -274,10 +323,15 @@ export async function sourceCandidatesForJob(jobOrId) {
         job.id,
         data.id,
         'CANDIDATE_SCORED',
-        `${data.name} scored ${data.fit_score || 0}/100`,
+        latestDiffersFromBest(data)
+          ? `${data.name} re-scored ${data.latest_fit_score || 0}/100; best remains ${data.fit_score || 0}/100`
+          : `${data.name} scored ${data.fit_score || 0}/100`,
         {
           fit_score: data.fit_score,
           fit_grade: data.fit_grade,
+          latest_fit_score: data.latest_fit_score,
+          latest_fit_grade: data.latest_fit_grade,
+          latest_rationale: data.latest_fit_rationale,
           rationale: data.fit_rationale,
           pipeline_stage: data.pipeline_stage,
         },
@@ -322,14 +376,17 @@ export async function sourceCandidatesForJob(jobOrId) {
 export async function scoreUnscoredCandidates(jobOrId) {
   const job = await getJob(jobOrId);
   if (!job) return 0;
+  const hasScoreHistory = await supportsScoreHistoryColumns();
 
-  const { data: unscored } = await supabase
+  let query = supabase
     .from('candidates')
     .select('*')
     .eq('job_id', job.id)
-    .is('fit_score', null)
     .not('pipeline_stage', 'eq', 'Archived')
     .limit(20);
+
+  query = hasScoreHistory ? query.is('latest_fit_score', null) : query.is('fit_score', null);
+  const { data: unscored } = await query;
 
   if (!unscored?.length) return 0;
 
@@ -342,14 +399,25 @@ export async function scoreUnscoredCandidates(jobOrId) {
       // eslint-disable-next-line no-await-in-loop
       const score = await scoreCandidateAgainstJob(candidate, job);
       const pipelineStage = score.fit_score >= 60 ? 'Shortlisted' : score.fit_score >= 30 ? 'Sourced' : 'Archived';
+      const now = new Date().toISOString();
 
       // eslint-disable-next-line no-await-in-loop
-      await supabase.from('candidates').update({
+      const updatePayload = {
         fit_score: score.fit_score,
         fit_grade: score.fit_grade,
         fit_rationale: score.fit_rationale,
         pipeline_stage: pipelineStage,
-      }).eq('id', candidate.id);
+      };
+
+      if (hasScoreHistory) {
+        updatePayload.latest_fit_score = score.fit_score;
+        updatePayload.latest_fit_grade = score.fit_grade;
+        updatePayload.latest_fit_rationale = score.fit_rationale;
+        updatePayload.latest_scored_at = now;
+        updatePayload.best_scored_at = now;
+      }
+
+      await supabase.from('candidates').update(updatePayload).eq('id', candidate.id);
 
       // eslint-disable-next-line no-await-in-loop
       await logActivity(job.id, candidate.id, 'CANDIDATE_SCORED', `${candidate.name || 'Candidate'} scored ${score.fit_score}/100`, {
@@ -390,6 +458,7 @@ async function extractResumeText(buffer) {
 export async function sourceFromLinkedInJobPosting(jobOrId) {
   const job = await getJob(jobOrId);
   if (!job?.linkedin_job_posting_id) return [];
+  const hasScoreHistory = await supportsScoreHistoryColumns();
 
   const applicants = await getJobApplicants(job.linkedin_job_posting_id, {});
   const blockedProviderIds = await getActiveDuplicateProviderIds(job.id, (applicants || []).map((applicant) => applicant.provider_id || applicant.id));
@@ -425,7 +494,9 @@ export async function sourceFromLinkedInJobPosting(jobOrId) {
       .eq('job_id', job.id)
       .eq('linkedin_provider_id', candidate.linkedin_provider_id)
       .maybeSingle();
-    const candidatePayload = mergeCandidateWithExisting(existing, candidate);
+    const candidatePayload = hasScoreHistory
+      ? mergeCandidateWithExisting(existing, candidate)
+      : stripScoreHistoryFields(mergeCandidateWithExisting(existing, candidate));
 
     // eslint-disable-next-line no-await-in-loop
     const { data } = await supabase.from('candidates').upsert(candidatePayload, {
