@@ -9,6 +9,7 @@ import { deleteCandidateData } from '../services/gdprService.js';
 import { normalizeJobRecord, prepareJobPayload } from '../services/dbCompat.js';
 
 let bot;
+const pendingApprovalEdits = new Map();
 
 async function handleBriefCommand(chatId, text) {
   const rawText = text.replace(/^\/brief\s*/i, '').trim();
@@ -61,13 +62,24 @@ export function startTelegramBot() {
     if (chatId !== String(recruiterChatId) || !message.text) return;
 
     try {
+      const replyToMessageId = message.reply_to_message?.message_id;
+      if (replyToMessageId && pendingApprovalEdits.has(replyToMessageId)) {
+        const approvalId = pendingApprovalEdits.get(replyToMessageId);
+        pendingApprovalEdits.delete(replyToMessageId);
+        const updated = await editQueuedMessage(approvalId, message.text);
+        if (!updated) {
+          return bot.sendMessage(chatId, '⚠️ Could not update that approval. It may already have been handled.');
+        }
+        return bot.sendMessage(chatId, 'Draft updated. Use the original approval card buttons to approve or skip it.');
+      }
+
       if (message.text.startsWith('/brief')) return handleBriefCommand(chatId, message.text);
       if (message.text === '/status') return handleStatusCommand(chatId);
-      if (message.text.startsWith('/approve_')) return approveQueuedMessage(message.text.replace('/approve_', '').trim()).then(() => bot.sendMessage(chatId, 'Approved and queued for the next sending window.'));
+      if (message.text.startsWith('/approve_')) return approveQueuedMessage(message.text.replace('/approve_', '').trim()).then(() => bot.sendMessage(chatId, 'Approved. If the sending window is open, Raxion will send it now.'));
       if (message.text.startsWith('/edit_')) {
         const [approvalId, ...rest] = message.text.replace('/edit_', '').trim().split(' ');
         await editQueuedMessage(approvalId, rest.join(' '));
-        return bot.sendMessage(chatId, 'Approval message updated.');
+        return bot.sendMessage(chatId, 'Approval message updated. Approve it from Telegram or Mission Control when ready.');
       }
       if (message.text.startsWith('/skip_')) return skipQueuedMessage(message.text.replace('/skip_', '').trim()).then(() => bot.sendMessage(chatId, 'Skipped.'));
       if (message.text === '/pause') {
@@ -89,6 +101,50 @@ export function startTelegramBot() {
       }
     } catch (error) {
       await bot.sendMessage(chatId, '⚠️ Command failed');
+    }
+  });
+
+  bot.on('callback_query', async (query) => {
+    const chatId = String(query.message?.chat?.id || '');
+    if (chatId !== String(recruiterChatId)) {
+      await bot.answerCallbackQuery(query.id).catch(() => null);
+      return;
+    }
+
+    const payload = String(query.data || '');
+    const [scope, action, approvalId] = payload.split(':');
+    if (scope !== 'approval' || !action || !approvalId) {
+      await bot.answerCallbackQuery(query.id).catch(() => null);
+      return;
+    }
+
+    try {
+      if (action === 'approve') {
+        const result = await approveQueuedMessage(approvalId);
+        await bot.answerCallbackQuery(query.id, {
+          text: result?.status === 'sent' ? 'Approved and sent.' : 'Approved.',
+        }).catch(() => null);
+        return;
+      }
+
+      if (action === 'skip') {
+        const result = await skipQueuedMessage(approvalId);
+        await bot.answerCallbackQuery(query.id, {
+          text: result ? 'Skipped.' : 'Already handled.',
+        }).catch(() => null);
+        return;
+      }
+
+      if (action === 'edit') {
+        const prompt = await bot.sendMessage(chatId, 'Reply to this message with the updated draft text for this approval.', {
+          reply_markup: { force_reply: true, selective: true },
+        });
+        pendingApprovalEdits.set(prompt.message_id, approvalId);
+        await bot.answerCallbackQuery(query.id, { text: 'Send your edited draft as a reply.' }).catch(() => null);
+      }
+    } catch (error) {
+      await bot.answerCallbackQuery(query.id, { text: 'Action failed.' }).catch(() => null);
+      await bot.sendMessage(chatId, '⚠️ Telegram approval action failed.').catch(() => null);
     }
   });
 

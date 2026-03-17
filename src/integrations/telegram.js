@@ -28,7 +28,7 @@ async function sendTelegramRequest(method, payload) {
   return response.json();
 }
 
-export async function sendTelegramMessage(chatId, message) {
+export async function sendTelegramMessage(chatId, message, options = {}) {
   if (!chatId) {
     throw new Error('Missing Telegram chat id.');
   }
@@ -38,16 +38,18 @@ export async function sendTelegramMessage(chatId, message) {
     text: message,
     disable_web_page_preview: true,
     parse_mode: 'Markdown',
+    ...options,
   });
 }
 
-export async function editTelegramMessage(chatId, messageId, message) {
+export async function editTelegramMessage(chatId, messageId, message, options = {}) {
   return sendTelegramRequest('editMessageText', {
     chat_id: chatId,
     message_id: Number(messageId),
     text: message,
     disable_web_page_preview: true,
     parse_mode: 'Markdown',
+    ...options,
   });
 }
 
