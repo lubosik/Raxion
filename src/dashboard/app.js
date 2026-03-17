@@ -10,6 +10,7 @@
     runtime: null,
     health: null,
     config: [],
+    linkedinJobPostings: [],
     onboarding: null,
     selectedJobId: null,
     selectedJobDetail: null,
@@ -29,6 +30,7 @@
     candidatePanelDetail: null,
     createJobMode: 'outbound',
     createPostingMode: 'existing',
+    createJobPostingId: '',
     createJobTeamMembers: [{ name: '', email: '', telegram_chat_id: '', notify_on_shortlist: true, notify_on_interview_scheduled: true }],
     loading: false,
   };
@@ -223,6 +225,13 @@
       : [{ name: '', email: '', telegram_chat_id: '', notify_on_shortlist: true, notify_on_interview_scheduled: true }];
   }
 
+  function formatPostingOption(posting) {
+    const parts = [posting.title || 'Untitled posting'];
+    if (posting.company) parts.push(posting.company);
+    if (posting.location) parts.push(posting.location);
+    return parts.join(' · ');
+  }
+
   function isShortlistedCandidate(candidate) {
     return Number(candidate?.fit_score || 0) >= 60 && !['Archived', 'Rejected', 'Withdrawn'].includes(candidate?.pipeline_stage);
   }
@@ -356,7 +365,7 @@
     state.loading = true;
     render();
 
-    const [stats, jobs, inbox, activity, approvals, runtime, health, config, onboarding] = await Promise.all([
+    const [stats, jobs, inbox, activity, approvals, runtime, health, config, onboarding, linkedinJobPostings] = await Promise.all([
       request('/api/stats'),
       request('/api/jobs'),
       request('/api/inbox'),
@@ -366,6 +375,7 @@
       request('/api/health'),
       request('/api/config'),
       request('/api/onboarding'),
+      request('/api/linkedin/job-postings').catch(() => []),
     ]);
 
     const candidateResponses = await Promise.all(
@@ -380,6 +390,7 @@
     state.runtime = runtime;
     state.health = health;
     state.config = config || [];
+    state.linkedinJobPostings = linkedinJobPostings || [];
     state.onboarding = onboarding || null;
     state.jobCandidates = Object.fromEntries(candidateResponses);
     state.selectedJobId = state.selectedJobId || getActiveJobs()[0]?.id || jobs?.[0]?.id || null;
@@ -509,6 +520,9 @@
 
   function renderCreateJobForm() {
     if (!state.showCreateJobForm) return '';
+    const postingOptions = (state.linkedinJobPostings || [])
+      .map((posting) => `<option value="${esc(posting.id)}"${state.createJobPostingId === posting.id ? ' selected' : ''}>${esc(formatPostingOption(posting))}</option>`)
+      .join('');
     const teamRows = currentCreateTeamMembers().map((member, index) => (
       '<div class="surface form-grid form-span-2 applicant-team-row">' +
         `<label><span>Name</span><input class="input" data-action="update-team-member" data-id="${index}" data-extra="name" value="${esc(member.name || '')}" placeholder="Hiring Manager" /></label>` +
@@ -548,7 +562,15 @@
                 `<button class="tab-button${state.createPostingMode === 'create' ? ' active' : ''}" type="button" data-action="set-posting-mode" data-id="create">Create New Posting</button>` +
               '</div>' +
               (state.createPostingMode === 'existing'
-                ? '<label class="form-span-2"><span>LinkedIn Job Posting ID</span><input class="input" name="linkedin_job_posting_id" placeholder="LinkedIn posting ID" /></label>'
+                ? (
+                  '<div class="form-span-2 form-grid">' +
+                    '<label class="form-span-2"><span>LinkedIn Job Posting</span><select class="select" name="linkedin_job_posting_id" data-action="set-existing-posting"><option value="">Select a live LinkedIn posting</option>' + postingOptions + '</select></label>' +
+                    '<div class="button-row form-span-2"><button class="btn btn-secondary btn-sm" type="button" data-action="refresh-linkedin-postings">Refresh Postings</button></div>' +
+                    ((state.linkedinJobPostings || []).length
+                      ? ''
+                      : '<label class="form-span-2"><span>Posting ID Fallback</span><input class="input" name="linkedin_job_posting_id" value="' + esc(state.createJobPostingId || '') + '" placeholder="Paste LinkedIn posting ID if it is not listed yet" /></label>') +
+                  '</div>'
+                )
                 : '<label class="checkbox-row form-span-2"><input type="checkbox" name="create_linkedin_posting" checked /><span>Create new posting when job launches</span></label>') +
               '<label class="form-span-2"><span>Zoho Job Opening ID</span><input class="input" name="zoho_job_opening_id" placeholder="Optional existing Zoho Job Opening ID" /></label>' +
             '</div>'
@@ -1093,6 +1115,17 @@
 
     if (action === 'set-posting-mode') {
       state.createPostingMode = id;
+      render();
+      return;
+    }
+
+    if (action === 'set-existing-posting') {
+      state.createJobPostingId = sourceEl.value || '';
+      return;
+    }
+
+    if (action === 'refresh-linkedin-postings') {
+      state.linkedinJobPostings = await request('/api/linkedin/job-postings').catch(() => []);
       render();
       return;
     }

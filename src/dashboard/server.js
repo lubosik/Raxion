@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import supabase from '../db/supabase.js';
+import { listLinkedInJobPostings } from '../integrations/unipile.js';
 import { activityStream, fetchJobMetrics, logActivity } from '../services/activityLogger.js';
 import { sourceCandidatesForJob } from '../services/candidateSourcing.js';
 import { postJobToLinkedIn, ingestJobApplicants, closeLinkedInJob } from '../services/jobPostingService.js';
@@ -236,6 +237,22 @@ export function createDashboardServer() {
 
   app.get('/api/config', async (req, res) => {
     res.json(await listRuntimeConfig());
+  });
+
+  app.get('/api/linkedin/job-postings', async (req, res) => {
+    try {
+      const postings = await listLinkedInJobPostings();
+      res.json((postings || []).map((posting) => ({
+        id: posting.job_id || posting.id || null,
+        title: posting.title || posting.job_title?.text || posting.job_title || posting.name || 'Untitled posting',
+        company: posting.company?.name || posting.company_name || null,
+        location: posting.location?.name || posting.location || null,
+        status: posting.status || posting.state || null,
+        raw: posting,
+      })).filter((posting) => posting.id));
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
   });
 
   app.get('/api/onboarding', async (req, res) => {
