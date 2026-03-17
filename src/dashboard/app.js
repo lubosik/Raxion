@@ -435,8 +435,8 @@
         '<label><span>Seniority</span><input class="input" name="seniority_level" placeholder="Senior" /></label>' +
         '<label><span>Must-have Skills</span><input class="input" name="tech_stack_must" placeholder="Recruitment, BD, LinkedIn outreach" /></label>' +
         '<label><span>Timezone</span><input class="input" name="timezone" placeholder="Europe/London" /></label>' +
-        '<label><span>Send Window Start</span><input class="input" name="send_window_start" placeholder="09:00" /></label>' +
-        '<label><span>Send Window End</span><input class="input" name="send_window_end" placeholder="17:00" /></label>' +
+        '<label><span>Send Window Start</span><input class="input" name="send_from" placeholder="09:00" /></label>' +
+        '<label><span>Send Window End</span><input class="input" name="send_until" placeholder="17:00" /></label>' +
         '<label><span>LinkedIn Daily Limit</span><input class="input" name="linkedin_daily_limit" type="number" min="1" placeholder="28" /></label>' +
         '<label class="form-span-2"><span>Role Notes</span><textarea class="input textarea" name="notes" placeholder="What makes a good candidate, market notes, messaging context, client nuances."></textarea></label>' +
         '<div class="form-span-2 button-row"><button class="btn btn-primary" type="submit">Create Job</button><button class="btn btn-secondary" type="button" data-action="toggle-create-job" data-id="off">Cancel</button></div>' +
