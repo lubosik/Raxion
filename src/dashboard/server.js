@@ -6,7 +6,12 @@ import supabase from '../db/supabase.js';
 import { activityStream, fetchJobMetrics, logActivity } from '../services/activityLogger.js';
 import { sourceCandidatesForJob } from '../services/candidateSourcing.js';
 import { postJobToLinkedIn, ingestJobApplicants, closeLinkedInJob } from '../services/jobPostingService.js';
-import { approveQueuedMessage, editQueuedMessage, skipQueuedMessage } from '../services/approvalService.js';
+import {
+  approveQueuedMessage,
+  editQueuedMessage,
+  skipQueuedMessage,
+  rejectPendingApprovalsForCandidate,
+} from '../services/approvalService.js';
 import { deleteCandidateData } from '../services/gdprService.js';
 import { syncCandidateToATS } from '../integrations/zohoRecruit.js';
 import { generateInterviewBrief } from '../services/qualificationEngine.js';
@@ -14,6 +19,7 @@ import { getRuntimeState, toggleRuntimeStateValue } from '../services/runtimeSta
 import { listRuntimeConfig, setRuntimeConfigValue, deleteRuntimeConfigValue } from '../services/configService.js';
 import { getIntegrationHealth } from '../services/healthService.js';
 import { getSetting } from '../services/settings.js';
+import { markConversationEnded } from '../services/conversationState.js';
 import {
   normalizeApprovalRecord,
   normalizeConversationRecord,
@@ -363,7 +369,35 @@ export function createDashboardServer() {
   });
 
   app.post('/api/candidates/:id/stage', async (req, res) => {
-    const { data } = await supabase.from('candidates').update({ pipeline_stage: req.body.stage }).eq('id', req.params.id).select('*').single();
+    const { data: existing } = await supabase.from('candidates').select('*').eq('id', req.params.id).single();
+    const updates = req.body.stage === 'Archived'
+      ? markConversationEnded(existing, req.body.reason || 'Archived manually', { archive: true })
+      : { pipeline_stage: req.body.stage };
+    const { data } = await supabase.from('candidates').update(updates).eq('id', req.params.id).select('*').single();
+    if (req.body.stage === 'Archived') {
+      await rejectPendingApprovalsForCandidate(req.params.id, 'Candidate archived');
+      await logActivity(data.job_id, data.id, 'CHAT_ENDED', `${data.name} conversation ended manually`, {
+        reason: req.body.reason || 'Archived manually',
+        source: 'mission_control',
+      });
+    }
+    res.json(data);
+  });
+
+  app.post('/api/candidates/:id/end-chat', async (req, res) => {
+    const { data: candidate } = await supabase.from('candidates').select('*').eq('id', req.params.id).single();
+    const reason = req.body.reason || 'Ended manually from Mission Control';
+    const { data } = await supabase
+      .from('candidates')
+      .update(markConversationEnded(candidate, reason, { archive: true }))
+      .eq('id', req.params.id)
+      .select('*')
+      .single();
+    await rejectPendingApprovalsForCandidate(req.params.id, 'Conversation ended');
+    await logActivity(data.job_id, data.id, 'CHAT_ENDED', `${data.name} conversation ended manually`, {
+      reason,
+      source: 'mission_control',
+    });
     res.json(data);
   });
 

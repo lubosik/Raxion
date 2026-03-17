@@ -1,3 +1,5 @@
+import { getRuntimeConfigValue } from './configService.js';
+
 export function parseTemplates(rawTemplates) {
   if (!rawTemplates) return {};
   if (typeof rawTemplates === 'object') return rawTemplates;
@@ -43,12 +45,26 @@ export function ensureSignedMessage(job, messageText) {
   return `${replaced}\n\n${signature}`;
 }
 
+export function getAgentGuidanceBlock() {
+  const sections = [
+    ['Company context', getRuntimeConfigValue('RAXION_AGENT_COMPANY_CONTEXT', '')],
+    ['Voice guidance', getRuntimeConfigValue('RAXION_AGENT_VOICE_GUIDANCE', '')],
+    ['Reply guidance', getRuntimeConfigValue('RAXION_AGENT_REPLY_GUIDANCE', '')],
+  ].filter(([, value]) => String(value || '').trim());
+
+  if (!sections.length) return '';
+  return sections.map(([label, value]) => `${label}: ${String(value).trim()}`).join('\n');
+}
+
 export function buildTemplateAwarePrompt(job, key, fallbackPrompt) {
   const template = getTemplateValue(job, key);
   const signature = getSenderSignature(job);
   const signatureInstruction = `Write as ${signature}. Use that exact signature at the end of the message. Never use placeholders like [Your name].`;
+  const agentGuidance = getAgentGuidanceBlock();
 
-  if (!template) return `${fallbackPrompt}\n\n${signatureInstruction}`;
+  if (!template) {
+    return `${fallbackPrompt}\n\n${agentGuidance ? `Client guidance:\n${agentGuidance}\n\n` : ''}${signatureInstruction}`;
+  }
 
-  return `${fallbackPrompt}\n\nJob-specific template guidance:\n${template}\n\n${signatureInstruction}\n\nFollow the guidance above while still personalizing to the candidate and job.`;
+  return `${fallbackPrompt}\n\n${agentGuidance ? `Client guidance:\n${agentGuidance}\n\n` : ''}Job-specific template guidance:\n${template}\n\n${signatureInstruction}\n\nFollow the guidance above while still personalizing to the candidate and job.`;
 }

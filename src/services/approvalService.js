@@ -12,6 +12,7 @@ import {
 } from './dbCompat.js';
 import { isWithinSendingWindow } from './scheduleService.js';
 import { ensureSignedMessage } from './outreachTemplates.js';
+import { isConversationEnded } from './conversationState.js';
 
 const UNSENT_APPROVAL_STATUSES = ['pending', 'edited', 'approved'];
 
@@ -145,6 +146,9 @@ async function findExistingApproval(candidateId, channel, stage) {
 
 async function executeSend(approval, candidate) {
   const normalizedApproval = normalizeApprovalRecord(approval);
+  if (isConversationEnded(candidate)) {
+    throw new Error('Conversation has been ended for this candidate');
+  }
   validateDraftMessage(normalizedApproval.message_text, candidate);
 
   if (normalizedApproval.channel === 'linkedin_dm') {
@@ -233,6 +237,14 @@ export async function queueApproval({ candidateId, jobId, messageText, channel, 
   ]);
   if (candidateError || jobError || !candidate || !job) return null;
   const normalizedJob = normalizeJobRecord(job);
+  if (isConversationEnded(candidate)) {
+    await logActivity(jobId, candidateId, 'MESSAGE_SKIPPED', `Skipped ${channel} draft because conversation is ended`, {
+      channel,
+      stage,
+      conversation_ended: true,
+    });
+    return null;
+  }
   const finalMessageText = ['linkedin_dm', 'email'].includes(channel)
     ? ensureSignedMessage(normalizedJob, messageText)
     : messageText;
@@ -414,6 +426,21 @@ export async function executeApprovedSends(job) {
       continue;
     }
 
+    if (isConversationEnded(candidate)) {
+      // eslint-disable-next-line no-await-in-loop
+      await supabase.from('approval_queue').update(await prepareApprovalUpdatePayload({
+        status: 'rejected',
+      })).eq('id', approval.id);
+      // eslint-disable-next-line no-await-in-loop
+      await syncApprovalTelegramCard({ ...normalizedApproval, status: 'rejected' });
+      // eslint-disable-next-line no-await-in-loop
+      await logActivity(approval.job_id, approval.candidate_id, 'MESSAGE_SKIPPED', 'Approved send skipped because conversation is ended', {
+        approval_id: approval.id,
+        channel: normalizedApproval.channel,
+      });
+      continue;
+    }
+
     try {
       // eslint-disable-next-line no-await-in-loop
       const result = await executeSend(normalizedApproval, candidate);
@@ -497,4 +524,31 @@ export async function skipQueuedMessage(approvalId) {
   await logActivity(approval.job_id, approval.candidate_id, 'MESSAGE_SKIPPED', `Skipped queued ${normalizedApproval.channel} message`, { approval_id: approvalId });
   await syncApprovalTelegramCard(normalizedApproval);
   return normalizedApproval;
+}
+
+export async function rejectPendingApprovalsForCandidate(candidateId, reason = 'Conversation ended') {
+  const { data: approvals } = await supabase
+    .from('approval_queue')
+    .select('*')
+    .eq('candidate_id', candidateId)
+    .in('status', ['pending', 'edited', 'approved']);
+
+  let rejected = 0;
+  for (const approval of approvals || []) {
+    // eslint-disable-next-line no-await-in-loop
+    const { data: updated } = await supabase.from('approval_queue').update(await prepareApprovalUpdatePayload({
+      status: 'rejected',
+    })).eq('id', approval.id).select('*').single();
+    if (!updated) continue;
+    rejected += 1;
+    // eslint-disable-next-line no-await-in-loop
+    await logActivity(updated.job_id, updated.candidate_id, 'MESSAGE_SKIPPED', `${reason}: rejected queued ${updated.channel} approval`, {
+      approval_id: updated.id,
+      channel: updated.channel,
+    });
+    // eslint-disable-next-line no-await-in-loop
+    await syncApprovalTelegramCard(updated);
+  }
+
+  return rejected;
 }

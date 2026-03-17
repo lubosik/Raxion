@@ -5,12 +5,17 @@ import { sendTelegramMessage, getRecruiterChatId } from '../integrations/telegra
 import { syncCandidateToATS } from '../integrations/zohoRecruit.js';
 import { queueApproval } from './approvalService.js';
 import { logActivity } from './activityLogger.js';
-import { ensureSignedMessage, getSenderSignature } from './outreachTemplates.js';
+import { ensureSignedMessage, getSenderSignature, getAgentGuidanceBlock } from './outreachTemplates.js';
 import { normalizeConversationRecord, normalizeJobRecord, prepareConversationInsertPayload } from './dbCompat.js';
+import {
+  clearEndChatRecommendation,
+  markConversationEnded,
+  markEndChatRecommended,
+} from './conversationState.js';
 
 async function classifyReply(candidate, job, conversationHistory, messageText) {
   return callClaude(
-    `Classify this recruiting reply and return JSON.\nCandidate: ${JSON.stringify(candidate)}\nJob: ${JSON.stringify(job)}\nRecruiter identity: ${getSenderSignature(job)}\nConversation history: ${JSON.stringify(conversationHistory)}\nNew message: ${messageText}\nIf you provide suggested_reply, write it in the recruiter's voice, keep it consistent with the conversation history, and end it with the exact recruiter signature.\nReturn {"intent":"interested|not_interested|maybe_later|question|referral|booking_confirmed|other","sentiment":"positive|neutral|negative","key_points":"","concerns":"","qualified":true/false,"next_action":"send_booking_link|answer_question|escalate|archive|continue_conversation","suggested_reply":""}.`,
+    `Classify this recruiting reply and return JSON.\nCandidate: ${JSON.stringify(candidate)}\nJob: ${JSON.stringify(job)}\nRecruiter identity: ${getSenderSignature(job)}\nAgent guidance: ${getAgentGuidanceBlock() || 'None'}\nConversation history: ${JSON.stringify(conversationHistory)}\nNew message: ${messageText}\nIf you provide suggested_reply, write it in the recruiter's voice, keep it consistent with the conversation history, and end it with the exact recruiter signature.\nAlso decide whether the conversation should be recommended for closure because the thread has reached a natural conclusion, been declined, been booked, or been deferred.\nReturn {"intent":"interested|not_interested|maybe_later|question|referral|booking_confirmed|other","sentiment":"positive|neutral|negative","key_points":"","concerns":"","qualified":true/false,"next_action":"send_booking_link|answer_question|escalate|archive|continue_conversation","suggested_reply":"","should_end_conversation":true/false,"end_reason":""}.`,
     'You are a recruiting conversation classifier. Return valid JSON only.',
     { expectJson: true },
   ).catch(() => ({
@@ -21,6 +26,8 @@ async function classifyReply(candidate, job, conversationHistory, messageText) {
     qualified: false,
     next_action: 'escalate',
     suggested_reply: '',
+    should_end_conversation: false,
+    end_reason: '',
   }));
 }
 
@@ -175,7 +182,41 @@ export async function processIncomingMessage(webhookPayload) {
 
   const classification = await classifyReply(candidate, job, fullConversationHistory, messageText);
 
-  if (classification.qualified) {
+  if (classification.intent === 'booking_confirmed') {
+    await supabase.from('candidates').update({
+      pipeline_stage: 'Interview Booked',
+      interview_booked_at: new Date().toISOString(),
+      ...markConversationEnded(candidate, classification.end_reason || 'Meeting booked', { archive: false }),
+    }).eq('id', candidate.id);
+    await logActivity(candidate.job_id, candidate.id, 'CHAT_ENDED', `${candidate.name} conversation ended after booking confirmation`, {
+      reason: classification.end_reason || 'Meeting booked',
+      automatic: true,
+    });
+  } else if (classification.next_action === 'archive') {
+    await supabase.from('candidates').update(markConversationEnded(
+      candidate,
+      classification.end_reason || classification.concerns || 'Archived after reply classification',
+      { archive: true },
+    )).eq('id', candidate.id);
+    await logActivity(candidate.job_id, candidate.id, 'CHAT_ENDED', `${candidate.name} conversation ended and archived`, {
+      reason: classification.end_reason || classification.concerns || 'Archived after reply classification',
+      automatic: true,
+    });
+  } else if (classification.should_end_conversation) {
+    await supabase.from('candidates').update(markEndChatRecommended(
+      candidate,
+      classification.end_reason || classification.key_points || classification.concerns || 'Conversation appears complete',
+    )).eq('id', candidate.id);
+    await logActivity(candidate.job_id, candidate.id, 'CHAT_END_RECOMMENDED', `${candidate.name} conversation looks ready to end`, {
+      reason: classification.end_reason || classification.key_points || classification.concerns || 'Conversation appears complete',
+      intent: classification.intent,
+    });
+    await sendTelegramMessage(getRecruiterChatId(), `🧭 End chat recommended for ${candidate.name}: ${classification.end_reason || classification.key_points || 'conversation appears complete'}`).catch(() => null);
+  } else {
+    await supabase.from('candidates').update(clearEndChatRecommendation(candidate)).eq('id', candidate.id);
+  }
+
+  if (classification.qualified && classification.intent !== 'booking_confirmed') {
     await supabase.from('candidates').update({
       pipeline_stage: 'Qualified',
       qualified_at: new Date().toISOString(),
@@ -205,10 +246,6 @@ export async function processIncomingMessage(webhookPayload) {
       messageText: ensureSignedMessage(job, classification.suggested_reply),
     });
   } else if (classification.next_action === 'archive') {
-    await supabase.from('candidates').update({
-      pipeline_stage: 'Archived',
-      notes: `${candidate.notes || ''}\n${classification.concerns || 'Archived after reply classification'}`.trim(),
-    }).eq('id', candidate.id);
     await logActivity(candidate.job_id, candidate.id, 'CANDIDATE_ARCHIVED', `${candidate.name} archived after reply`, {
       intent: classification.intent,
       concerns: classification.concerns,

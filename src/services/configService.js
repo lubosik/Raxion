@@ -29,6 +29,9 @@ export const CONFIG_FIELDS = [
   { key: 'RAXION_SOURCING_COOLDOWN_HOURS', label: 'Sourcing Cooldown Hours', secret: false, restartRequired: false, category: 'Orchestration', inputType: 'number', description: 'Minimum hours between automatic sourcing runs for the same job.' },
   { key: 'RAXION_SOURCING_SEARCH_GUIDANCE', label: 'Search Guidance', secret: false, restartRequired: false, category: 'Orchestration', inputType: 'text', description: 'Optional extra instructions for candidate search generation, specific to this client or vertical.' },
   { key: 'RAXION_SCORING_GUIDANCE', label: 'Scoring Guidance', secret: false, restartRequired: false, category: 'Orchestration', inputType: 'text', description: 'Optional extra instructions for candidate scoring, specific to this client or vertical.' },
+  { key: 'RAXION_AGENT_COMPANY_CONTEXT', label: 'Company Context', secret: false, restartRequired: false, category: 'Agent Guidance', inputType: 'text', description: 'Client-specific context, ICP, positioning, and business constraints that Raxion should keep in mind.' },
+  { key: 'RAXION_AGENT_VOICE_GUIDANCE', label: 'Voice Guidance', secret: false, restartRequired: false, category: 'Agent Guidance', inputType: 'text', description: 'How messages should sound for this client across outreach and reply handling.' },
+  { key: 'RAXION_AGENT_REPLY_GUIDANCE', label: 'Reply Guidance', secret: false, restartRequired: false, category: 'Agent Guidance', inputType: 'text', description: 'Rules for reply handling, when to keep conversations open, and when to recommend ending them.' },
 ];
 
 function settingKey(key) {

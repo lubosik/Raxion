@@ -237,6 +237,18 @@
     }
   }
 
+  function hasNoteTag(candidate, tag) {
+    return String(candidate?.notes || '').includes(tag);
+  }
+
+  function extractTaggedNoteValue(candidate, prefix) {
+    const line = String(candidate?.notes || '')
+      .split('\n')
+      .map((item) => item.trim())
+      .find((item) => item.startsWith(prefix) && item.endsWith(']'));
+    return line ? line.slice(prefix.length, -1).trim() : '';
+  }
+
   function getScheduleWindows(job) {
     const templates = parseTemplates(job?.outreach_templates);
     const scheduleWindows = templates.schedule_windows || {};
@@ -777,6 +789,10 @@
   function renderCandidatePanel() {
     const candidate = state.candidatePanelDetail;
     if (!candidate) return '';
+    const endChatRecommended = hasNoteTag(candidate, '[CHAT_END_RECOMMENDED]');
+    const endChatRecommendationReason = extractTaggedNoteValue(candidate, '[CHAT_END_RECOMMENDATION:');
+    const chatEnded = hasNoteTag(candidate, '[CHAT_ENDED]');
+    const chatEndedReason = extractTaggedNoteValue(candidate, '[CHAT_END_REASON:');
     const stageOptions = Object.keys(STAGE_META).map((stage) => `<option value="${esc(stage)}"${candidate.pipeline_stage === stage ? ' selected' : ''}>${esc(stageInfo(stage).label)}</option>`).join('');
     const hasLatestEvaluation = candidate.latest_fit_score != null
       && (
@@ -790,6 +806,8 @@
         '<div class="drawer-head"><div><div class="label-caps">Candidate</div><h2 class="section-title">' + esc(candidate.name || 'Unknown') + '</h2><div class="candidate-sub">' + esc(candidate.current_title || 'No title') + ' · ' + esc(candidate.current_company || 'No company') + '</div></div><button class="btn btn-secondary btn-sm" data-action="close-candidate">Close</button></div>' +
         '<div class="drawer-body">' +
           '<div class="panel-block"><div class="panel-grid"><div><span class="panel-label">Location</span><strong>' + esc(candidate.location || '—') + '</strong></div><div><span class="panel-label">Score</span>' + scorePill(candidate.fit_score) + '</div><div><span class="panel-label">Stage</span>' + stageChip(candidate.pipeline_stage) + '</div><div><span class="panel-label">Profile</span>' + profileButton(candidate.linkedin_url) + '</div></div></div>' +
+          (endChatRecommended ? '<div class="panel-block"><div class="panel-label">Conversation recommendation</div><p><strong>End chat recommended.</strong> ' + esc(endChatRecommendationReason || 'The thread appears complete.') + '</p></div>' : '') +
+          (chatEnded ? '<div class="panel-block"><div class="panel-label">Conversation status</div><p><strong>Chat ended.</strong> ' + esc(chatEndedReason || 'No further outreach will be sent.') + '</p></div>' : '') +
           '<div class="panel-block"><div class="panel-label">Fit rationale</div><p>' + esc(candidate.fit_rationale || 'No rationale.') + '</p></div>' +
           (hasLatestEvaluation
             ? '<div class="panel-block"><div class="panel-label">Latest Re-evaluation</div><p><strong>' + esc(`${candidate.latest_fit_score}/100 ${candidate.latest_fit_grade || ''}`.trim()) + '</strong></p><p>' + esc(candidate.latest_fit_rationale || 'No latest rationale.') + '</p></div>'
@@ -798,7 +816,7 @@
           '<div class="panel-block"><div class="panel-label">Past employers</div><p>' + esc(candidate.past_employers || 'No employer history captured.') + '</p></div>' +
           '<div class="panel-block"><div class="panel-label">Stage change</div><div class="button-row"><select id="candidate-stage-select" class="select">' + stageOptions + '</select><button class="btn btn-primary btn-sm" data-action="save-candidate-stage" data-id="' + esc(candidate.id) + '">Save Stage</button></div></div>' +
           '<div class="panel-block"><div class="panel-label">Conversation history</div>' + (candidate.conversation_history || []).map((message) => `<div class="conversation-card ${message.direction === 'inbound' ? 'inbound' : 'outbound'}"><div class="conversation-meta">${esc(message.channel || 'message')} · ${esc(formatTime(message.sent_at))}</div><div>${esc(message.message_text || '')}</div></div>`).join('') + ((candidate.conversation_history || []).length ? '' : '<div class="muted-inline">No conversation history.</div>') + '</div>' +
-          '<div class="button-row"><button class="btn btn-secondary btn-sm" data-action="sync-ats" data-id="' + esc(candidate.id) + '">Sync to ATS</button><button class="btn btn-secondary btn-sm" data-action="archive-candidate" data-id="' + esc(candidate.id) + '">Archive</button></div>' +
+          '<div class="button-row"><button class="btn btn-secondary btn-sm" data-action="sync-ats" data-id="' + esc(candidate.id) + '">Sync to ATS</button><button class="btn btn-secondary btn-sm" data-action="archive-candidate" data-id="' + esc(candidate.id) + '">Archive</button><button class="btn btn-danger btn-sm" data-action="end-chat" data-id="' + esc(candidate.id) + '">End Chat</button></div>' +
         '</div>' +
       '</aside>'
     );
@@ -914,12 +932,25 @@
       await request(`/api/candidates/${id}/stage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ stage: 'Archived' }),
+        body: JSON.stringify({ stage: 'Archived', reason: 'Archived from Mission Control' }),
       });
       showToast('Candidate archived.');
       await loadCoreData();
       if (state.selectedJobId) await loadSelectedJob(state.selectedJobId);
       if (state.candidatePanelId === id) closeCandidatePanel();
+      return;
+    }
+
+    if (action === 'end-chat') {
+      await request(`/api/candidates/${id}/end-chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: 'Ended from Mission Control' }),
+      });
+      showToast('Conversation ended. Candidate archived and future outreach blocked.');
+      await loadCoreData();
+      if (state.selectedJobId) await loadSelectedJob(state.selectedJobId);
+      if (state.candidatePanelId === id) await openCandidatePanel(id);
       return;
     }
 
