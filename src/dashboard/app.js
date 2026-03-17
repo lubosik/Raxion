@@ -20,6 +20,8 @@
     selectedGlobalActivityGroup: 'all',
     selectedJobActivityType: 'all',
     showCreateJobForm: false,
+    editingApprovalId: null,
+    editingApprovalText: '',
     candidatePanelId: null,
     candidatePanelDetail: null,
     loading: false,
@@ -598,6 +600,7 @@
       content = (
         '<form id="job-templates-form" class="surface form-grid" data-job-id="' + esc(job.id) + '">' +
           '<div class="form-span-2"><div class="label-caps">Templates</div><h2 class="section-title">Message Templates</h2></div>' +
+          '<label class="form-span-2"><span>Sender Signature</span><input class="input" name="sender_signature" value="' + esc(templates.sender_signature || '') + '" placeholder="Richard | LIBDR" /></label>' +
           '<label class="form-span-2"><span>LinkedIn DM</span><textarea class="input textarea" name="linkedin_dm">' + esc(templates.linkedin_dm || '') + '</textarea></label>' +
           '<label class="form-span-2"><span>Email</span><textarea class="input textarea" name="email">' + esc(templates.email || '') + '</textarea></label>' +
           '<label class="form-span-2"><span>Follow-up</span><textarea class="input textarea" name="follow_up">' + esc(templates.follow_up || '') + '</textarea></label>' +
@@ -702,6 +705,25 @@
     return '<section class="view-section"><div class="approvals-stack">' + cards + '</div></section>';
   }
 
+  function renderApprovalEditor() {
+    if (!state.editingApprovalId) return '';
+    const approval = state.approvals.find((item) => item.id === state.editingApprovalId)
+      || state.selectedJobApprovals.find((item) => item.id === state.editingApprovalId)
+      || state.candidatePanelDetail?.approvals?.find((item) => item.id === state.editingApprovalId);
+
+    return (
+      '<div class="modal-backdrop" data-action="close-edit-approval"></div>' +
+      '<div class="modal-shell">' +
+        '<form id="approval-edit-form" class="surface modal-card">' +
+          `<input type="hidden" name="approval_id" value="${esc(state.editingApprovalId)}" />` +
+          '<div class="section-head"><div><div class="label-caps">Edit Approval</div><h2 class="section-title small">Update Draft Before Approval</h2><div class="candidate-sub">' + esc(approval?.candidates?.name || 'Approval draft') + '</div></div><button class="btn btn-secondary btn-sm" type="button" data-action="close-edit-approval">Close</button></div>' +
+          '<label class="form-span-2"><span>Message</span><textarea class="input textarea approval-editor-textarea" name="message_text" required>' + esc(state.editingApprovalText || '') + '</textarea></label>' +
+          '<div class="button-row"><button class="btn btn-primary" type="submit">Save Draft</button><button class="btn btn-secondary" type="button" data-action="close-edit-approval">Cancel</button></div>' +
+        '</form>' +
+      '</div>'
+    );
+  }
+
   function renderControls() {
     const runtime = state.runtime || {};
     const health = state.health || {};
@@ -803,7 +825,7 @@
       controls: renderControls,
     };
 
-    app.innerHTML = (views[state.view] || renderOverview)() + renderCandidatePanel();
+    app.innerHTML = (views[state.view] || renderOverview)() + renderCandidatePanel() + renderApprovalEditor();
   }
 
   function markApprovalLocally(approvalId, status) {
@@ -951,19 +973,18 @@
     }
 
     if (action === 'edit-approval') {
-      const approval = state.approvals.find((item) => item.id === id);
-      const next = window.prompt('Edit message', approval?.message_text || '');
-      if (next == null) return;
-      const updated = await request(`/api/approval-queue/${id}/edit`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message_text: next }),
-      });
-      const target = state.approvals.find((item) => item.id === id);
-      if (target) {
-        target.message_text = updated.message_text;
-        target.status = updated.status;
-      }
+      const approval = state.approvals.find((item) => item.id === id)
+        || state.selectedJobApprovals.find((item) => item.id === id)
+        || state.candidatePanelDetail?.approvals?.find((item) => item.id === id);
+      state.editingApprovalId = id;
+      state.editingApprovalText = approval?.message_text || '';
+      render();
+      return;
+    }
+
+    if (action === 'close-edit-approval') {
+      state.editingApprovalId = null;
+      state.editingApprovalText = '';
       render();
       return;
     }
@@ -1125,6 +1146,27 @@
       await loadSelectedJob(jobId);
       await loadCoreData();
       state.view = 'jobs';
+      render();
+      return;
+    }
+
+    if (event.target.id === 'approval-edit-form') {
+      event.preventDefault();
+      const payload = Object.fromEntries(new FormData(event.target).entries());
+      const updated = await request(`/api/approval-queue/${payload.approval_id}/edit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message_text: payload.message_text }),
+      });
+      [state.approvals, state.selectedJobApprovals, state.candidatePanelDetail?.approvals].filter(Boolean).forEach((items) => {
+        const target = items.find((item) => item.id === payload.approval_id);
+        if (target) {
+          target.message_text = updated.message_text;
+          target.status = updated.status;
+        }
+      });
+      state.editingApprovalId = null;
+      state.editingApprovalText = '';
       render();
       return;
     }

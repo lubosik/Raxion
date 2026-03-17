@@ -5,11 +5,12 @@ import { sendTelegramMessage, getRecruiterChatId } from '../integrations/telegra
 import { syncCandidateToATS } from '../integrations/zohoRecruit.js';
 import { queueApproval } from './approvalService.js';
 import { logActivity } from './activityLogger.js';
+import { ensureSignedMessage, getSenderSignature } from './outreachTemplates.js';
 import { normalizeConversationRecord, normalizeJobRecord, prepareConversationInsertPayload } from './dbCompat.js';
 
 async function classifyReply(candidate, job, conversationHistory, messageText) {
   return callClaude(
-    `Classify this recruiting reply and return JSON.\nCandidate: ${JSON.stringify(candidate)}\nJob: ${JSON.stringify(job)}\nConversation history: ${JSON.stringify(conversationHistory)}\nNew message: ${messageText}\nReturn {"intent":"interested|not_interested|maybe_later|question|referral|booking_confirmed|other","sentiment":"positive|neutral|negative","key_points":"","concerns":"","qualified":true/false,"next_action":"send_booking_link|answer_question|escalate|archive|continue_conversation","suggested_reply":""}.`,
+    `Classify this recruiting reply and return JSON.\nCandidate: ${JSON.stringify(candidate)}\nJob: ${JSON.stringify(job)}\nRecruiter identity: ${getSenderSignature(job)}\nConversation history: ${JSON.stringify(conversationHistory)}\nNew message: ${messageText}\nIf you provide suggested_reply, write it in the recruiter's voice, keep it consistent with the conversation history, and end it with the exact recruiter signature.\nReturn {"intent":"interested|not_interested|maybe_later|question|referral|booking_confirmed|other","sentiment":"positive|neutral|negative","key_points":"","concerns":"","qualified":true/false,"next_action":"send_booking_link|answer_question|escalate|archive|continue_conversation","suggested_reply":""}.`,
     'You are a recruiting conversation classifier. Return valid JSON only.',
     { expectJson: true },
   ).catch(() => ({
@@ -155,7 +156,7 @@ export async function processIncomingMessage(webhookPayload) {
       jobId: candidate.job_id,
       channel: 'linkedin_dm',
       stage: 'Qualified',
-      messageText: `Thanks for the reply. You can book a time here: ${job.calendly_link}`,
+      messageText: ensureSignedMessage(job, `Thanks for the reply. You can book a time here: ${job.calendly_link}`),
     });
   } else if (classification.next_action === 'answer_question' || classification.next_action === 'continue_conversation') {
     await queueApproval({
@@ -163,7 +164,7 @@ export async function processIncomingMessage(webhookPayload) {
       jobId: candidate.job_id,
       channel: 'linkedin_dm',
       stage: candidate.pipeline_stage,
-      messageText: classification.suggested_reply,
+      messageText: ensureSignedMessage(job, classification.suggested_reply),
     });
   } else if (classification.next_action === 'archive') {
     await supabase.from('candidates').update({

@@ -11,6 +11,7 @@ import {
   prepareConversationInsertPayload,
 } from './dbCompat.js';
 import { isWithinSendingWindow } from './scheduleService.js';
+import { ensureSignedMessage } from './outreachTemplates.js';
 
 const UNSENT_APPROVAL_STATUSES = ['pending', 'edited', 'approved'];
 
@@ -29,6 +30,9 @@ export function validateDraftMessage(content, candidate) {
     'please provide the',
     'insufficient data',
     'cannot construct',
+    '[your name]',
+    '[sender name]',
+    '[recruiter name]',
   ];
 
   const lower = content.toLowerCase();
@@ -178,9 +182,13 @@ export async function queueApproval({ candidateId, jobId, messageText, channel, 
     supabase.from('jobs').select('*').eq('id', jobId).single(),
   ]);
   if (candidateError || jobError || !candidate || !job) return null;
+  const normalizedJob = normalizeJobRecord(job);
+  const finalMessageText = ['linkedin_dm', 'email'].includes(channel)
+    ? ensureSignedMessage(normalizedJob, messageText)
+    : messageText;
 
   try {
-    validateDraftMessage(messageText, candidate);
+    validateDraftMessage(finalMessageText, candidate);
   } catch (error) {
     await logActivity(jobId, candidateId, 'MESSAGE_VALIDATION_FAILED', `Draft blocked for ${channel}: ${error.message}`, {
       channel,
@@ -191,13 +199,13 @@ export async function queueApproval({ candidateId, jobId, messageText, channel, 
 
   const existing = await findExistingApproval(candidateId, channel, stage);
   if (existing) {
-    if (existing.status !== 'approved' && existing.message_text !== messageText) {
+    if (existing.status !== 'approved' && existing.message_text !== finalMessageText) {
       const { data: updated } = await supabase.from('approval_queue').update({
-        message_text: messageText,
+        message_text: finalMessageText,
       }).eq('id', existing.id).select('*').single();
 
       if (updated?.telegram_message_id) {
-        await editTelegramMessage(getRecruiterChatId(), updated.telegram_message_id, approvalMessage(candidate, job, updated)).catch(() => null);
+        await editTelegramMessage(getRecruiterChatId(), updated.telegram_message_id, approvalMessage(candidate, normalizedJob, updated)).catch(() => null);
       }
 
       await logActivity(jobId, candidateId, 'MESSAGE_DRAFT_UPDATED', `Updated queued ${channel} draft`, {
@@ -212,7 +220,7 @@ export async function queueApproval({ candidateId, jobId, messageText, channel, 
   const { data: approval, error } = await supabase.from('approval_queue').insert(await prepareApprovalInsertPayload({
     candidate_id: candidateId,
     job_id: jobId,
-    message_text: messageText,
+    message_text: finalMessageText,
     channel,
     stage,
     message_type: channel,
@@ -220,7 +228,7 @@ export async function queueApproval({ candidateId, jobId, messageText, channel, 
   if (error || !approval) return null;
   const normalizedApproval = normalizeApprovalRecord(approval);
 
-  const telegramResponse = await sendTelegramMessage(getRecruiterChatId(), approvalMessage(candidate, job, approval)).catch(() => null);
+  const telegramResponse = await sendTelegramMessage(getRecruiterChatId(), approvalMessage(candidate, normalizedJob, approval)).catch(() => null);
   if (telegramResponse?.result?.message_id) {
     await supabase.from('approval_queue').update(await prepareApprovalUpdatePayload({
       telegram_message_id: String(telegramResponse.result.message_id),
