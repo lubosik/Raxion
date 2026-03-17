@@ -18,7 +18,7 @@ import { generateInterviewBrief } from '../services/qualificationEngine.js';
 import { getRuntimeState, toggleRuntimeStateValue } from '../services/runtimeState.js';
 import { listRuntimeConfig, setRuntimeConfigValue, deleteRuntimeConfigValue } from '../services/configService.js';
 import { getIntegrationHealth } from '../services/healthService.js';
-import { getSetting } from '../services/settings.js';
+import { getSetting, setSetting } from '../services/settings.js';
 import { markConversationEnded } from '../services/conversationState.js';
 import {
   normalizeApprovalRecord,
@@ -50,6 +50,7 @@ function htmlPage() {
       <div class="brand"><div class="brand-title">Raxion</div><div class="brand-sub">Mission Control</div></div>
       <nav class="nav">
         <a class="nav-link active" href="#overview" data-view="overview"><span class="nav-icon">◈</span><span>Overview</span><span class="nav-dot"></span></a>
+        <a class="nav-link" href="#train-agent" data-view="train-agent"><span class="nav-icon">✦</span><span>Train Agent</span><span class="nav-dot"></span></a>
         <a class="nav-link" href="#jobs" data-view="jobs"><span class="nav-icon">◻</span><span>Jobs</span><span class="nav-dot"></span></a>
         <a class="nav-link" href="#pipeline" data-view="pipeline"><span class="nav-icon">▦</span><span>Pipeline</span><span class="nav-dot"></span></a>
         <a class="nav-link" href="#archived" data-view="archived"><span class="nav-icon">▤</span><span>Archived</span><span class="nav-dot"></span></a>
@@ -144,6 +145,7 @@ async function requireMissionControlAuth(req, res, next) {
 
 export function createDashboardServer() {
   const app = express();
+  app.use(express.json());
   app.use(requireMissionControlAuth);
   app.use('/dashboard', express.static(__dirname));
 
@@ -221,6 +223,70 @@ export function createDashboardServer() {
 
   app.get('/api/config', async (req, res) => {
     res.json(await listRuntimeConfig());
+  });
+
+  app.get('/api/onboarding', async (req, res) => {
+    const config = await listRuntimeConfig();
+    const keys = [
+      'RAXION_AGENT_BRAND_NAME',
+      'SENDER_NAME',
+      'REPLY_TO_EMAIL',
+      'RAXION_AGENT_COMPANY_CONTEXT',
+      'RAXION_AGENT_VOICE_GUIDANCE',
+      'RAXION_AGENT_REPLY_GUIDANCE',
+      'RAXION_SOURCING_SEARCH_GUIDANCE',
+      'RAXION_SCORING_GUIDANCE',
+    ];
+    const fields = Object.fromEntries(
+      config
+        .filter((field) => keys.includes(field.key))
+        .map((field) => [field.key, field.value || '']),
+    );
+    const [completed, completedAt] = await Promise.all([
+      getSetting('agent_training_completed', 'false'),
+      getSetting('agent_training_completed_at', ''),
+    ]);
+    res.json({
+      completed: completed === 'true',
+      completed_at: completedAt || null,
+      fields,
+    });
+  });
+
+  app.post('/api/onboarding', async (req, res) => {
+    const payload = req.body || {};
+    const allowedKeys = [
+      'RAXION_AGENT_BRAND_NAME',
+      'SENDER_NAME',
+      'REPLY_TO_EMAIL',
+      'RAXION_AGENT_COMPANY_CONTEXT',
+      'RAXION_AGENT_VOICE_GUIDANCE',
+      'RAXION_AGENT_REPLY_GUIDANCE',
+      'RAXION_SOURCING_SEARCH_GUIDANCE',
+      'RAXION_SCORING_GUIDANCE',
+    ];
+
+    for (const key of allowedKeys) {
+      // eslint-disable-next-line no-await-in-loop
+      await setRuntimeConfigValue(key, payload[key] || '');
+    }
+
+    const completedAt = new Date().toISOString();
+    await Promise.all([
+      setSetting('agent_training_completed', 'true'),
+      setSetting('agent_training_completed_at', completedAt),
+    ]);
+
+    await logActivity(null, null, 'AGENT_TRAINING_UPDATED', 'Agent training guidance updated from Mission Control', {
+      keys: allowedKeys.filter((key) => String(payload[key] || '').trim()),
+      completed_at: completedAt,
+    });
+
+    res.json({
+      success: true,
+      completed: true,
+      completed_at: completedAt,
+    });
   });
 
   app.post('/api/config', async (req, res) => {

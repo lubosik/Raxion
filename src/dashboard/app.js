@@ -10,6 +10,7 @@
     runtime: null,
     health: null,
     config: [],
+    onboarding: null,
     selectedJobId: null,
     selectedJobDetail: null,
     selectedJobCandidates: [],
@@ -336,7 +337,7 @@
     state.loading = true;
     render();
 
-    const [stats, jobs, inbox, activity, approvals, runtime, health, config] = await Promise.all([
+    const [stats, jobs, inbox, activity, approvals, runtime, health, config, onboarding] = await Promise.all([
       request('/api/stats'),
       request('/api/jobs'),
       request('/api/inbox'),
@@ -345,6 +346,7 @@
       request('/api/state'),
       request('/api/health'),
       request('/api/config'),
+      request('/api/onboarding'),
     ]);
 
     const candidateResponses = await Promise.all(
@@ -359,9 +361,15 @@
     state.runtime = runtime;
     state.health = health;
     state.config = config || [];
+    state.onboarding = onboarding || null;
     state.jobCandidates = Object.fromEntries(candidateResponses);
     state.selectedJobId = state.selectedJobId || getActiveJobs()[0]?.id || jobs?.[0]?.id || null;
     state.loading = false;
+
+    if (!(state.onboarding?.completed) && (!window.location.hash || window.location.hash === '#overview')) {
+      state.view = 'train-agent';
+      window.location.hash = 'train-agent';
+    }
 
     if (state.selectedJobId) {
       await loadSelectedJob(state.selectedJobId);
@@ -412,6 +420,7 @@
 
   function renderOverview() {
     const stats = state.stats || {};
+    const onboarding = state.onboarding || {};
     const rows = getActiveJobs().map((job) => {
       const counts = getJobCounts(job.id);
       return (
@@ -431,6 +440,9 @@
 
     return (
       '<section class="view-section">' +
+        (!onboarding.completed
+          ? '<div class="surface onboarding-banner"><div><div class="label-caps">Setup</div><h2 class="section-title small">Train your agent before scaling outreach</h2><div class="job-detail-sub">Add company context, voice rules, and conversation handling guidance so Raxion drafts and closes threads the right way.</div></div><div class="button-row"><button class="btn btn-primary" data-action="open-onboarding" data-id="train-agent">Train Agent</button></div></div>'
+          : '') +
         '<div class="metric-strip">' +
           `<div class="metric-card strip-card"><div class="metric-number">${stats.candidates_sourced || 0}</div><div class="metric-caption">Total Sourced</div></div>` +
           `<div class="metric-card strip-card"><div class="metric-number">${stats.invites_sent || 0}</div><div class="metric-caption">LinkedIn Requests</div></div>` +
@@ -786,6 +798,61 @@
     );
   }
 
+  function onboardingField(fields, key) {
+    return fields?.[key] || '';
+  }
+
+  function renderTrainAgent() {
+    const onboarding = state.onboarding || { completed: false, fields: {} };
+    const fields = onboarding.fields || {};
+    const brandName = onboardingField(fields, 'RAXION_AGENT_BRAND_NAME') || 'Your Recruitment Brand';
+    const completedMeta = onboarding.completed && onboarding.completed_at
+      ? `Last trained ${formatDateTime(onboarding.completed_at)}`
+      : 'Complete this once, then revisit it any time as the agent learns.';
+
+    return (
+      '<section class="view-section">' +
+        '<section class="train-agent-hero surface">' +
+          '<div class="train-agent-copy">' +
+            '<div class="label-caps">Train Agent</div>' +
+            `<h2 class="section-title">${esc(brandName)}</h2>` +
+            '<p class="train-agent-lead">Define how Raxion represents your business, how it qualifies and closes conversations, and what good candidate targeting looks like. These settings feed live outreach and reply handling.</p>' +
+            `<div class="candidate-sub">${esc(completedMeta)}</div>` +
+          '</div>' +
+          '<div class="train-agent-badges">' +
+            `<div class="train-agent-stat"><strong>${onboarding.completed ? 'Live' : 'Pending'}</strong><span>Training status</span></div>` +
+            '<div class="train-agent-stat"><strong>Outreach</strong><span>Voice + positioning</span></div>' +
+            '<div class="train-agent-stat"><strong>Replies</strong><span>Closure + escalation</span></div>' +
+          '</div>' +
+        '</section>' +
+        '<form id="agent-training-form" class="train-agent-grid">' +
+          '<section class="surface train-agent-section">' +
+            '<div class="section-head"><div><div class="label-caps">Identity</div><h3 class="section-title small">Who the agent represents</h3></div></div>' +
+            '<label><span>Brand Name</span><input class="input" name="RAXION_AGENT_BRAND_NAME" value="' + esc(onboardingField(fields, 'RAXION_AGENT_BRAND_NAME')) + '" placeholder="LIBDR" /></label>' +
+            '<label><span>Sender Name</span><input class="input" name="SENDER_NAME" value="' + esc(onboardingField(fields, 'SENDER_NAME')) + '" placeholder="Richard" /></label>' +
+            '<label><span>Reply-To Email</span><input class="input" name="REPLY_TO_EMAIL" value="' + esc(onboardingField(fields, 'REPLY_TO_EMAIL')) + '" placeholder="richard@libdr.com" /></label>' +
+          '</section>' +
+          '<section class="surface train-agent-section">' +
+            '<div class="section-head"><div><div class="label-caps">Context</div><h3 class="section-title small">Market and company guidance</h3></div></div>' +
+            '<label><span>Company Context</span><textarea class="input textarea" name="RAXION_AGENT_COMPANY_CONTEXT" placeholder="What the company does, target clients, ICP, candidate profile, deal breakers, positioning.">' + esc(onboardingField(fields, 'RAXION_AGENT_COMPANY_CONTEXT')) + '</textarea></label>' +
+            '<label><span>Search Guidance</span><textarea class="input textarea" name="RAXION_SOURCING_SEARCH_GUIDANCE" placeholder="How sourcing should think about titles, industries, locations, and adjacencies.">' + esc(onboardingField(fields, 'RAXION_SOURCING_SEARCH_GUIDANCE')) + '</textarea></label>' +
+            '<label><span>Scoring Guidance</span><textarea class="input textarea" name="RAXION_SCORING_GUIDANCE" placeholder="What makes a strong fit, what should be penalized, and how to rank tradeoffs.">' + esc(onboardingField(fields, 'RAXION_SCORING_GUIDANCE')) + '</textarea></label>' +
+          '</section>' +
+          '<section class="surface train-agent-section">' +
+            '<div class="section-head"><div><div class="label-caps">Conversation</div><h3 class="section-title small">Voice, replies, and closing threads</h3></div></div>' +
+            '<label><span>Voice Guidance</span><textarea class="input textarea" name="RAXION_AGENT_VOICE_GUIDANCE" placeholder="How outreach and replies should sound. Tone, style, brevity, formality, commercial posture.">' + esc(onboardingField(fields, 'RAXION_AGENT_VOICE_GUIDANCE')) + '</textarea></label>' +
+            '<label><span>Reply Guidance</span><textarea class="input textarea" name="RAXION_AGENT_REPLY_GUIDANCE" placeholder="When to continue the conversation, when to recommend ending the chat, when to archive, and when to escalate to a recruiter.">' + esc(onboardingField(fields, 'RAXION_AGENT_REPLY_GUIDANCE')) + '</textarea></label>' +
+          '</section>' +
+          '<section class="surface train-agent-section train-agent-summary">' +
+            '<div class="section-head"><div><div class="label-caps">Apply</div><h3 class="section-title small">Save live guidance</h3></div></div>' +
+            '<p class="job-detail-sub">Saving this updates Raxion immediately. New outreach drafts, reply classifications, and end-chat recommendations will use these rules on the next cycle.</p>' +
+            '<div class="button-row"><button class="btn btn-primary" type="submit">Save Training</button><button class="btn btn-secondary" type="button" data-action="open-onboarding" data-id="controls">Open Raw Controls</button></div>' +
+          '</section>' +
+        '</form>' +
+      '</section>'
+    );
+  }
+
   function renderCandidatePanel() {
     const candidate = state.candidatePanelDetail;
     if (!candidate) return '';
@@ -834,6 +901,7 @@
 
     const views = {
       overview: renderOverview,
+      'train-agent': renderTrainAgent,
       jobs: renderJobs,
       pipeline: renderPipeline,
       archived: renderArchived,
@@ -878,6 +946,13 @@
       window.location.hash = 'jobs';
       render();
       if (state.showCreateJobForm) scrollToId('job-create-form');
+      return;
+    }
+
+    if (action === 'open-onboarding') {
+      state.view = id || 'train-agent';
+      window.location.hash = state.view;
+      render();
       return;
     }
 
@@ -1124,6 +1199,28 @@
       state.showCreateJobForm = false;
       render();
       scrollToId('job-detail-anchor');
+      return;
+    }
+
+    if (event.target.id === 'agent-training-form') {
+      event.preventDefault();
+      const payload = Object.fromEntries(new FormData(event.target).entries());
+      const result = await request('/api/onboarding', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      showToast('Agent training saved.');
+      await loadCoreData();
+      state.onboarding = {
+        ...(state.onboarding || {}),
+        completed: result.completed,
+        completed_at: result.completed_at,
+        fields: payload,
+      };
+      state.view = 'overview';
+      window.location.hash = 'overview';
+      render();
       return;
     }
 

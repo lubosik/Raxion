@@ -242,7 +242,9 @@ th {
 .approval-card,
 .thread-card,
 .health-card,
-.config-card {
+.config-card,
+.train-agent-section,
+.train-agent-hero {
   padding: 24px;
 }
 
@@ -429,7 +431,8 @@ tbody tr:last-child td {
 
 .jobs-grid,
 .health-grid,
-.config-grid {
+.config-grid,
+.train-agent-grid {
   display: grid;
   gap: 32px;
 }
@@ -444,6 +447,77 @@ tbody tr:last-child td {
 
 .config-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.train-agent-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.train-agent-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(280px, 0.9fr);
+  gap: 28px;
+  background:
+    radial-gradient(circle at top right, rgba(45, 106, 79, 0.18), transparent 40%),
+    linear-gradient(135deg, #f7fbf7 0%, #f0f6f2 100%);
+}
+
+.train-agent-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.train-agent-lead {
+  max-width: 62ch;
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.train-agent-badges {
+  display: grid;
+  gap: 14px;
+}
+
+.train-agent-stat {
+  padding: 16px 18px;
+  border: 1px solid rgba(24, 32, 27, 0.08);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.75);
+}
+
+.train-agent-stat strong {
+  display: block;
+  font-size: 1.4rem;
+  line-height: 1.1;
+  letter-spacing: -0.04em;
+}
+
+.train-agent-stat span {
+  color: var(--muted);
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.train-agent-section {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.train-agent-summary {
+  justify-content: space-between;
+}
+
+.onboarding-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 20px;
+  background:
+    linear-gradient(135deg, rgba(219, 234, 254, 0.5), rgba(209, 250, 229, 0.55)),
+    var(--panel);
 }
 
 .config-group {

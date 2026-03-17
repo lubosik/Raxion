@@ -24,6 +24,7 @@ export const CONFIG_FIELDS = [
   { key: 'PORT', label: 'Port', secret: false, restartRequired: true, category: 'Server', inputType: 'number' },
   { key: 'SENDER_NAME', label: 'Sender Name', secret: false, restartRequired: false, category: 'Server', inputType: 'text' },
   { key: 'REPLY_TO_EMAIL', label: 'Reply-To Email', secret: false, restartRequired: false, category: 'Server', inputType: 'text' },
+  { key: 'RAXION_AGENT_BRAND_NAME', label: 'Brand Name', secret: false, restartRequired: false, category: 'Agent Guidance', inputType: 'text', description: 'Client or business name used throughout Train Agent setup and internal guidance.' },
   { key: 'RAXION_SOURCING_PIPELINE_TARGET', label: 'Pipeline Target', secret: false, restartRequired: false, category: 'Orchestration', inputType: 'number', description: 'Top up sourcing when pre-outreach candidates fall below this count.' },
   { key: 'RAXION_SOURCING_SHORTLIST_TARGET', label: 'Shortlist Target', secret: false, restartRequired: false, category: 'Orchestration', inputType: 'number', description: 'Top up sourcing when shortlisted candidates fall below this count.' },
   { key: 'RAXION_SOURCING_COOLDOWN_HOURS', label: 'Sourcing Cooldown Hours', secret: false, restartRequired: false, category: 'Orchestration', inputType: 'number', description: 'Minimum hours between automatic sourcing runs for the same job.' },
