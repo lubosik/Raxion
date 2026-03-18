@@ -324,6 +324,28 @@ th {
   color: var(--red-fg);
 }
 
+.btn-danger-outline {
+  background: transparent;
+  border-color: rgba(153, 27, 27, 0.28);
+  color: var(--red-fg);
+}
+
+.btn-danger-solid {
+  background: #ef4444;
+  border-color: #ef4444;
+  color: #ffffff;
+}
+
+.btn-danger-solid:hover {
+  background: #dc2626;
+  border-color: #dc2626;
+}
+
+.btn-danger-outline:hover,
+.btn-danger:hover {
+  background: #fef2f2;
+}
+
 .btn-sm {
   min-width: 80px;
 }
@@ -413,6 +435,28 @@ tbody tr:hover {
 
 tbody tr:last-child td {
   border-bottom: 0;
+}
+
+.danger-zone {
+  border: 1px solid #ef4444;
+}
+
+.danger-action {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 24px;
+  padding: 18px 0;
+  border-top: 1px solid #f3f4f6;
+}
+
+.danger-action strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.danger-action p {
+  color: var(--muted);
 }
 
 .mini-progress {

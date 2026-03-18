@@ -13,7 +13,12 @@ import {
   skipQueuedMessage,
   rejectPendingApprovalsForCandidate,
 } from '../services/approvalService.js';
-import { deleteCandidateData } from '../services/gdprService.js';
+import {
+  clearEntirePipeline,
+  deleteCandidate,
+  deleteJob,
+  nuclearReset,
+} from '../services/gdprService.js';
 import { syncCandidateToATS } from '../integrations/zohoRecruit.js';
 import { generateInterviewBrief } from '../services/qualificationEngine.js';
 import { getRuntimeState, toggleRuntimeStateValue } from '../services/runtimeState.js';
@@ -447,15 +452,16 @@ export function createDashboardServer() {
     res.json({ success: true });
   });
   app.delete('/api/jobs/:id', async (req, res) => {
-    if (req.body.confirm !== true) return res.status(400).json({ error: 'confirmation required' });
-    const { data: candidates } = await supabase.from('candidates').select('id').eq('job_id', req.params.id);
-    for (const candidate of candidates || []) {
-      // eslint-disable-next-line no-await-in-loop
-      await deleteCandidateData(candidate.id, 'Job deleted', 'recruiter');
+    try {
+      const result = await deleteJob(req.params.id, req.body?.reason || 'user_requested', 'dashboard_user');
+      res.json({
+        success: true,
+        message: 'Job and all associated candidates deleted permanently.',
+        ...result,
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
     }
-    await supabase.from('jobs').delete().eq('id', req.params.id);
-    await logActivity(req.params.id, null, 'GDPR_DELETE', 'Deleted job and related candidates', {});
-    res.json({ success: true });
   });
 
   app.get('/api/jobs/:id/candidates', async (req, res) => {
@@ -572,7 +578,34 @@ export function createDashboardServer() {
   });
 
   app.delete('/api/candidates/:id', async (req, res) => {
-    res.json(await deleteCandidateData(req.params.id, req.body.reason, 'recruiter'));
+    try {
+      const result = await deleteCandidate(req.params.id, req.body?.reason || 'user_requested', 'dashboard_user');
+      res.json({
+        success: true,
+        message: 'Candidate deleted permanently.',
+        ...result,
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.delete('/api/pipeline/clear', async (req, res) => {
+    try {
+      const count = await clearEntirePipeline(req.body?.reason || 'user_requested_full_pipeline_clear', 'dashboard_user');
+      res.json({ success: true, message: `Pipeline cleared. ${count} candidates removed.`, count });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.delete('/api/system/reset', async (req, res) => {
+    try {
+      await nuclearReset(req.body?.reason || 'user_requested_full_system_reset', 'dashboard_user');
+      res.json({ success: true, message: 'Full system reset complete. All data deleted.' });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
   });
 
   app.post('/api/candidates/:id/approve/:approvalId', async (req, res) => {

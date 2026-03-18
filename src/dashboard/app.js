@@ -214,6 +214,73 @@
     });
   }
 
+  function removeCandidateFromState(candidateId) {
+    state.jobCandidates = Object.fromEntries(
+      Object.entries(state.jobCandidates).map(([jobId, candidates]) => [
+        jobId,
+        (candidates || []).filter((candidate) => candidate.id !== candidateId),
+      ]),
+    );
+    state.selectedJobCandidates = (state.selectedJobCandidates || []).filter((candidate) => candidate.id !== candidateId);
+    state.selectedJobApplicants = (state.selectedJobApplicants || []).filter((candidate) => candidate.id !== candidateId);
+    state.approvals = (state.approvals || []).filter((item) => item.candidate_id !== candidateId);
+    state.selectedJobApprovals = (state.selectedJobApprovals || []).filter((item) => item.candidate_id !== candidateId);
+    state.inbox = (state.inbox || []).filter((item) => (item.candidate_id || item.candidates?.id) !== candidateId);
+    state.activity = (state.activity || []).filter((item) => item.candidate_id !== candidateId);
+    state.selectedJobActivity = (state.selectedJobActivity || []).filter((item) => item.candidate_id !== candidateId);
+    if (state.candidatePanelId === candidateId) {
+      state.candidatePanelId = null;
+      state.candidatePanelDetail = null;
+    }
+  }
+
+  function removeJobFromState(jobId) {
+    state.jobs = (state.jobs || []).filter((job) => job.id !== jobId);
+    delete state.jobCandidates[jobId];
+    state.approvals = (state.approvals || []).filter((item) => item.job_id !== jobId);
+    state.selectedJobApprovals = (state.selectedJobApprovals || []).filter((item) => item.job_id !== jobId);
+    state.inbox = (state.inbox || []).filter((item) => item.jobs?.id !== jobId);
+    state.activity = (state.activity || []).filter((item) => item.job_id !== jobId);
+    state.selectedJobActivity = [];
+    if (state.selectedJobId === jobId) {
+      state.selectedJobId = state.jobs[0]?.id || null;
+      state.selectedJobDetail = null;
+      state.selectedJobCandidates = [];
+      state.selectedJobApplicants = [];
+      state.selectedJobApprovals = [];
+      state.selectedJobTeamMembers = [];
+    }
+  }
+
+  function clearPipelineState() {
+    state.jobCandidates = Object.fromEntries(Object.keys(state.jobCandidates).map((jobId) => [jobId, []]));
+    state.selectedJobCandidates = [];
+    state.selectedJobApplicants = [];
+    state.approvals = [];
+    state.selectedJobApprovals = [];
+    state.inbox = [];
+    state.candidatePanelId = null;
+    state.candidatePanelDetail = null;
+  }
+
+  function clearSystemState() {
+    state.stats = null;
+    state.jobs = [];
+    state.jobCandidates = {};
+    state.inbox = [];
+    state.activity = [];
+    state.approvals = [];
+    state.selectedJobId = null;
+    state.selectedJobDetail = null;
+    state.selectedJobCandidates = [];
+    state.selectedJobApplicants = [];
+    state.selectedJobActivity = [];
+    state.selectedJobApprovals = [];
+    state.selectedJobTeamMembers = [];
+    state.candidatePanelId = null;
+    state.candidatePanelDetail = null;
+  }
+
   function getActiveJobs() {
     return (state.jobs || []).filter((job) => job.status === 'ACTIVE' && !job.paused);
   }
@@ -533,14 +600,14 @@
     const borderClass = job.status === 'ACTIVE' ? 'job-border-active' : job.status === 'PAUSED' ? 'job-border-paused' : 'job-border-closed';
     const selectedClass = state.selectedJobId === job.id ? ' is-selected' : '';
     return (
-      '<article class="job-card ' + borderClass + selectedClass + '">' +
+      '<article class="job-card ' + borderClass + selectedClass + '" data-job-id="' + esc(job.id) + '">' +
         `<div class="job-card-head"><div><h3 class="job-card-title">${esc(job.job_title || job.name)}</h3><div class="job-card-sub">${esc(job.client_name || 'Unknown client')} · ${esc(job.location || 'No location')}</div></div>${statusChip(job.status)}</div>` +
         '<div class="job-bars">' +
           `<div class="job-bar-row"><span>${renderProgressBar({ sourced: counts.sourced, shortlisted: 0, outreach: 0, replies: 0 })}</span><strong>${counts.sourced} sourced</strong></div>` +
           `<div class="job-bar-row"><span>${renderProgressBar({ sourced: 0, shortlisted: counts.shortlisted, outreach: 0, replies: 0 })}</span><strong>${counts.shortlisted} shortlisted</strong></div>` +
           `<div class="job-bar-row"><span>${renderProgressBar({ sourced: 0, shortlisted: 0, outreach: counts.outreach, replies: 0 })}</span><strong>${counts.outreach} outreach</strong></div>` +
         '</div>' +
-        `<div class="button-row"><button class="btn btn-primary btn-sm" data-action="open-job" data-id="${esc(job.id)}">View</button><button class="btn btn-secondary btn-sm" data-action="source-now" data-id="${esc(job.id)}">Source Now</button><button class="btn btn-danger btn-sm" data-action="close-job" data-id="${esc(job.id)}">Close</button></div>` +
+        `<div class="button-row"><button class="btn btn-primary btn-sm" data-action="open-job" data-id="${esc(job.id)}">View</button><button class="btn btn-secondary btn-sm" data-action="source-now" data-id="${esc(job.id)}">Source Now</button><button class="btn btn-secondary btn-sm" data-action="close-job" data-id="${esc(job.id)}">Close</button><button class="btn btn-danger-outline btn-sm" data-action="delete-job" data-id="${esc(job.id)}" data-extra="${esc(job.job_title || job.name || 'Job')}">Delete Permanently</button></div>` +
       '</article>'
     );
   }
@@ -626,7 +693,7 @@
       ].filter(Boolean).join(' · ');
       const job = state.jobs.find((item) => item.id === candidate.job_id);
       return (
-        '<tr>' +
+        '<tr data-candidate-id="' + esc(candidate.id) + '">' +
           `<td><div class="candidate-primary"><button class="text-link candidate-name" data-action="open-candidate" data-id="${esc(candidate.id)}">${esc(candidate.name || 'Unknown')}</button><div class="candidate-sub">${esc(detailLines)}</div></div></td>` +
           (showJob ? `<td>${esc(job?.job_title || '—')}</td>` : '') +
           `<td>${esc(candidate.current_company || '—')}</td>` +
@@ -637,7 +704,7 @@
           (outreach ? `<td>${esc(candidateOutreachChannel(candidate))}</td><td>${esc(formatTime(candidateLastAction(candidate)))}</td><td>${esc(formatTime(candidate.follow_up_due_at))}</td>` : '') +
           (replies ? `<td>${esc(((state.inbox.find((item) => item.candidate_id === candidate.id) || {}).message_text || '').slice(0, 80) || 'No reply summary')}</td><td>${candidate.qualified_at ? '<span class="stage-chip stage-qualified">Yes</span>' : '<span class="stage-chip stage-sourced">No</span>'}</td><td>${stageChip(candidate.pipeline_stage)}</td>` : '') +
           `<td>${esc(formatTime(candidateLastAction(candidate)))}</td>` +
-          `<td><div class="button-row">${profileButton(candidate.linkedin_url)}<button class="btn btn-secondary btn-sm" data-action="${archived ? 'reinstate-candidate' : 'archive-candidate'}" data-id="${esc(candidate.id)}">${archived ? 'Reinstate' : 'Archive'}</button></div></td>` +
+          `<td><div class="button-row">${profileButton(candidate.linkedin_url)}<button class="btn btn-secondary btn-sm" data-action="${archived ? 'reinstate-candidate' : 'archive-candidate'}" data-id="${esc(candidate.id)}">${archived ? 'Reinstate' : 'Archive'}</button><button class="btn btn-danger-outline btn-sm" data-action="delete-candidate" data-id="${esc(candidate.id)}" data-extra="${esc(candidate.name || 'Candidate')}">Delete</button></div></td>` +
         '</tr>'
       );
     }).join('') || '<tr><td colspan="' + (showJob ? '8' : archived ? '8' : outreach ? '10' : replies ? '10' : '7') + '">No candidates in this view.</td></tr>';
@@ -657,7 +724,7 @@
 
   function renderApplicantTable(applicants) {
     const rows = (applicants || []).map((candidate) => (
-      '<tr>' +
+      '<tr data-candidate-id="' + esc(candidate.id) + '">' +
         `<td><div class="candidate-primary"><button class="text-link candidate-name" data-action="open-candidate" data-id="${esc(candidate.id)}">${esc(candidate.name || 'Unknown')}</button><div class="candidate-sub">${esc(candidate.current_title || 'No title')}</div></div></td>` +
         `<td>${esc(formatDateTime(candidate.applied_at))}</td>` +
         `<td>${scorePill(candidate.fit_score)}</td>` +
@@ -665,7 +732,7 @@
         `<td>${candidate.resume_text ? '<span class="stage-chip stage-enriched">Parsed</span>' : '<span class="stage-chip stage-sourced">None</span>'}</td>` +
         `<td>${candidate.reply_sent ? '<span class="stage-chip stage-qualified">Sent</span>' : hasActiveApproval(state.selectedJobApprovals, candidate.id, 'email') ? '<span class="stage-chip stage-enriched">Pending</span>' : '<span class="stage-chip stage-sourced">Not queued</span>'}</td>` +
         `<td>${candidate.interview_scheduled ? '<span class="stage-chip stage-qualified">Scheduled</span>' : '<span class="stage-chip stage-sourced">Not scheduled</span>'}</td>` +
-        `<td><div class="button-row"><button class="btn btn-secondary btn-sm" data-action="open-candidate" data-id="${esc(candidate.id)}">View</button><button class="btn btn-secondary btn-sm" data-action="queue-applicant-reply" data-id="${esc(candidate.id)}">Reply</button><button class="btn btn-secondary btn-sm" data-action="schedule-interview" data-id="${esc(candidate.id)}">Schedule Interview</button><button class="btn btn-danger btn-sm" data-action="archive-candidate" data-id="${esc(candidate.id)}">Archive</button></div></td>` +
+        `<td><div class="button-row"><button class="btn btn-secondary btn-sm" data-action="open-candidate" data-id="${esc(candidate.id)}">View</button><button class="btn btn-secondary btn-sm" data-action="queue-applicant-reply" data-id="${esc(candidate.id)}">Reply</button><button class="btn btn-secondary btn-sm" data-action="schedule-interview" data-id="${esc(candidate.id)}">Schedule Interview</button><button class="btn btn-secondary btn-sm" data-action="archive-candidate" data-id="${esc(candidate.id)}">Archive</button><button class="btn btn-danger-outline btn-sm" data-action="delete-candidate" data-id="${esc(candidate.id)}" data-extra="${esc(candidate.name || 'Candidate')}">Delete</button></div></td>` +
       '</tr>'
     )).join('') || '<tr><td colspan="8">No applicants yet.</td></tr>';
 
@@ -801,9 +868,9 @@
 
     return (
       '<section class="view-section" id="job-detail-anchor">' +
-        '<div class="job-detail-header surface">' +
+        '<div class="job-detail-header surface" data-job-id="' + esc(job.id) + '">' +
           '<div><div class="label-caps">Job Detail</div><h2 class="section-title">' + esc(job.job_title || job.name) + '</h2><div class="job-detail-sub">' + esc(job.client_name || 'Unknown client') + ' · ' + esc(job.location || 'No location') + '</div></div>' +
-          '<div class="button-row"><button class="btn btn-primary btn-sm" data-action="source-now" data-id="' + esc(job.id) + '">Source Now</button>' + (jobSupportsInbound(job) ? '<button class="btn btn-secondary btn-sm" data-action="fetch-applicants" data-id="' + esc(job.id) + '">Fetch Applicants</button>' : '') + '<button class="btn btn-secondary btn-sm" data-action="close-job" data-id="' + esc(job.id) + '">Close</button></div>' +
+          '<div class="button-row"><button class="btn btn-primary btn-sm" data-action="source-now" data-id="' + esc(job.id) + '">Source Now</button>' + (jobSupportsInbound(job) ? '<button class="btn btn-secondary btn-sm" data-action="fetch-applicants" data-id="' + esc(job.id) + '">Fetch Applicants</button>' : '') + '<button class="btn btn-secondary btn-sm" data-action="close-job" data-id="' + esc(job.id) + '">Close</button><button class="btn btn-danger-outline btn-sm" data-action="delete-job" data-id="' + esc(job.id) + '" data-extra="' + esc(job.job_title || job.name || 'Job') + '">Delete Permanently</button></div>' +
         '</div>' +
         '<div class="tab-row">' + visibleTabs.map(([key, label]) => `<button class="tab-button${state.selectedJobTab === key ? ' active' : ''}" data-action="set-job-tab" data-id="${esc(key)}">${esc(label)}</button>`).join('') + '</div>' +
         content +
@@ -825,7 +892,7 @@
     const candidates = Object.values(state.jobCandidates).flat();
     return (
       '<section class="view-section">' +
-        '<div class="surface"><div class="section-head"><div><div class="label-caps">Pipeline</div><h2 class="section-title">All Candidates</h2></div></div>' + renderCandidateTable(candidates, { showJob: true }) + '</div>' +
+        '<div class="surface"><div class="section-head"><div><div class="label-caps">Pipeline</div><h2 class="section-title">All Candidates</h2></div><button class="btn btn-danger-outline btn-sm" data-action="clear-pipeline">Clear Pipeline</button></div>' + renderCandidateTable(candidates, { showJob: true }) + '</div>' +
       '</section>'
     );
   }
@@ -967,6 +1034,7 @@
             '</div>' +
           '</section>'
         )).join('') + '</div></div>' +
+        '<div class="surface danger-zone"><div><div class="label-caps">Danger Zone</div><h2 class="section-title small">Permanent Actions</h2><p class="job-detail-sub">These actions are destructive and cannot be undone.</p></div><div class="danger-action"><div><strong>Clear Pipeline</strong><p>Delete all candidates from all jobs. Jobs remain intact.</p></div><button class="btn btn-danger-outline btn-sm" data-action="clear-pipeline">Clear Pipeline</button></div><div class="danger-action"><div><strong>Full System Reset</strong><p>Delete all jobs, candidates, activity, conversations, approvals, and webhook history. Complete fresh start.</p></div><button class="btn btn-danger-solid btn-sm" data-action="nuclear-reset">Reset Everything</button></div></div>' +
       '</section>'
     );
   }
@@ -1060,7 +1128,7 @@
           (isApplicant ? '<div class="panel-block"><div class="panel-label">Education</div><p>' + esc(candidate.education || 'No education captured.') + '</p></div>' : '') +
           '<div class="panel-block"><div class="panel-label">Stage change</div><div class="button-row"><select id="candidate-stage-select" class="select">' + stageOptions + '</select><button class="btn btn-primary btn-sm" data-action="save-candidate-stage" data-id="' + esc(candidate.id) + '">Save Stage</button></div></div>' +
           '<div class="panel-block"><div class="panel-label">Conversation history</div>' + (candidate.conversation_history || []).map((message) => `<div class="conversation-card ${message.direction === 'inbound' ? 'inbound' : 'outbound'}"><div class="conversation-meta">${esc(message.channel || 'message')} · ${esc(formatTime(message.sent_at))}</div><div>${esc(message.message_text || '')}</div></div>`).join('') + ((candidate.conversation_history || []).length ? '' : '<div class="muted-inline">No conversation history.</div>') + '</div>' +
-          '<div class="button-row"><button class="btn btn-secondary btn-sm" data-action="sync-ats" data-id="' + esc(candidate.id) + '">Sync to ATS</button>' + (isApplicant ? '<button class="btn btn-secondary btn-sm" data-action="queue-applicant-reply" data-id="' + esc(candidate.id) + '">Send Reply Email</button><button class="btn btn-secondary btn-sm" data-action="schedule-interview" data-id="' + esc(candidate.id) + '">Schedule Interview</button>' : '') + '<button class="btn btn-secondary btn-sm" data-action="archive-candidate" data-id="' + esc(candidate.id) + '">Archive</button><button class="btn btn-danger btn-sm" data-action="end-chat" data-id="' + esc(candidate.id) + '">End Chat</button></div>' +
+          '<div class="button-row"><button class="btn btn-secondary btn-sm" data-action="sync-ats" data-id="' + esc(candidate.id) + '">Sync to ATS</button>' + (isApplicant ? '<button class="btn btn-secondary btn-sm" data-action="queue-applicant-reply" data-id="' + esc(candidate.id) + '">Send Reply Email</button><button class="btn btn-secondary btn-sm" data-action="schedule-interview" data-id="' + esc(candidate.id) + '">Schedule Interview</button>' : '') + '<button class="btn btn-secondary btn-sm" data-action="archive-candidate" data-id="' + esc(candidate.id) + '">Archive</button><button class="btn btn-danger btn-sm" data-action="end-chat" data-id="' + esc(candidate.id) + '">End Chat</button><button class="btn btn-danger-outline btn-sm" data-action="delete-candidate" data-id="' + esc(candidate.id) + '" data-extra="' + esc(candidate.name || 'Candidate') + '">Delete</button></div>' +
         '</div>' +
       '</aside>'
     );
@@ -1249,6 +1317,23 @@
       return;
     }
 
+    if (action === 'delete-job') {
+      const jobTitle = extra || state.jobs.find((job) => job.id === id)?.job_title || 'this job';
+      const confirmed = window.confirm(`Permanently delete "${jobTitle}" and all its candidates?\n\nThis cannot be undone.`);
+      if (!confirmed) return;
+      const response = await request(`/api/jobs/${id}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: 'user_requested' }),
+      });
+      removeJobFromState(id);
+      render();
+      showToast(response.message || `"${jobTitle}" deleted permanently.`, 'success');
+      await loadCoreData();
+      if (state.selectedJobId) await loadSelectedJob(state.selectedJobId);
+      return;
+    }
+
     if (action === 'open-candidate') {
       await openCandidatePanel(id);
       return;
@@ -1269,6 +1354,23 @@
       await loadCoreData();
       if (state.selectedJobId) await loadSelectedJob(state.selectedJobId);
       if (state.candidatePanelId === id) closeCandidatePanel();
+      return;
+    }
+
+    if (action === 'delete-candidate') {
+      const candidateName = extra || state.candidatePanelDetail?.name || 'this candidate';
+      const confirmed = window.confirm(`Permanently delete ${candidateName}? This cannot be undone and all their data will be removed.`);
+      if (!confirmed) return;
+      const response = await request(`/api/candidates/${id}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: 'user_requested' }),
+      });
+      removeCandidateFromState(id);
+      render();
+      showToast(response.message || `${candidateName} deleted permanently.`, 'success');
+      await loadCoreData();
+      if (state.selectedJobId) await loadSelectedJob(state.selectedJobId);
       return;
     }
 
@@ -1403,6 +1505,44 @@
       state.view = 'controls';
       render();
       return;
+    }
+
+    if (action === 'clear-pipeline') {
+      const confirmed = window.confirm(
+        'Clear the entire pipeline?\n\nThis will permanently delete all candidates from all jobs.\nJobs will remain intact and can be re-sourced.\n\nThis cannot be undone.',
+      );
+      if (!confirmed) return;
+      const doubleConfirmed = window.confirm('Final confirmation: clear the entire pipeline now?');
+      if (!doubleConfirmed) return;
+      const response = await request('/api/pipeline/clear', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: 'user_requested_full_pipeline_clear' }),
+      });
+      clearPipelineState();
+      render();
+      showToast(response.message || 'Pipeline cleared.', 'success');
+      await loadCoreData();
+      if (state.selectedJobId) await loadSelectedJob(state.selectedJobId);
+      return;
+    }
+
+    if (action === 'nuclear-reset') {
+      const stepOne = window.confirm(
+        'FULL SYSTEM RESET\n\nThis will permanently delete all jobs, candidates, conversations, activity logs, approvals, and webhook history.\n\nRaxion will have no memory of any previous run.\n\nAre you sure you want to continue?',
+      );
+      if (!stepOne) return;
+      const stepTwo = window.confirm('Final warning: this cannot be undone. Confirm full reset?');
+      if (!stepTwo) return;
+      const response = await request('/api/system/reset', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: 'user_requested_full_system_reset' }),
+      });
+      clearSystemState();
+      render();
+      showToast(response.message || 'System reset complete. All data deleted.', 'success');
+      window.setTimeout(() => window.location.reload(), 1500);
     }
   }
 
