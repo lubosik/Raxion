@@ -68,11 +68,11 @@ export async function logActivityOncePerWindow(jobId, candidateId, eventType, su
 export async function fetchJobMetrics(jobId) {
   const [{ count: sourced }, { count: outreach }, { count: replies }, { count: qualified }, { count: interviews }, { count: approvals }, { count: invites }, { count: accepted }, { count: emailsSent }, { count: emailReplies }] = await Promise.all([
     supabase.from('candidates').select('*', { count: 'exact', head: true }).eq('job_id', jobId),
-    supabase.from('candidates').select('*', { count: 'exact', head: true }).eq('job_id', jobId).in('pipeline_stage', ['invite_sent', 'invite_accepted', 'dm_sent', 'email_sent', 'Replied', 'Qualified', 'Interview Booked', 'Interview Scheduled', 'Offered', 'Placed']),
+    supabase.from('candidates').select('*', { count: 'exact', head: true }).eq('job_id', jobId).in('pipeline_stage', ['invite_sent', 'invite_accepted', 'pending_approval', 'dm_approved', 'email_approved', 'dm_sent', 'email_sent', 'reply_received', 'Replied', 'in_conversation', 'Interview Booked', 'Interview Scheduled', 'Offered', 'Placed']),
     supabase.from('candidates').select('*', { count: 'exact', head: true }).eq('job_id', jobId).not('last_reply_at', 'is', null),
-    supabase.from('candidates').select('*', { count: 'exact', head: true }).eq('job_id', jobId).eq('pipeline_stage', 'Qualified'),
+    supabase.from('candidates').select('*', { count: 'exact', head: true }).eq('job_id', jobId).not('qualified_at', 'is', null),
     supabase.from('candidates').select('*', { count: 'exact', head: true }).eq('job_id', jobId).not('interview_booked_at', 'is', null),
-    supabase.from('approval_queue').select('*', { count: 'exact', head: true }).eq('job_id', jobId).in('status', ['pending', 'edited']),
+    supabase.from('approval_queue').select('*', { count: 'exact', head: true }).eq('job_id', jobId).in('status', ['pending', 'edited', 'approved']),
     supabase.from('candidates').select('*', { count: 'exact', head: true }).eq('job_id', jobId).not('invite_sent_at', 'is', null),
     supabase.from('candidates').select('*', { count: 'exact', head: true }).eq('job_id', jobId).not('invite_accepted_at', 'is', null),
     supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('job_id', jobId).eq('direction', 'outbound').eq('channel', 'email'),

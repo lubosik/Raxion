@@ -35,7 +35,7 @@ async function draftMessage(prompt) {
 }
 
 async function notifyDraftFailure(job, candidate, channel, stage) {
-  await logActivityOncePerWindow(
+  const activity = await logActivityOncePerWindow(
     job.id,
     candidate.id,
     'MESSAGE_DRAFT_ERROR',
@@ -50,10 +50,29 @@ async function notifyDraftFailure(job, candidate, channel, stage) {
     60,
   );
 
+  if (!activity) {
+    return;
+  }
+
   await sendTelegramMessage(
     getRecruiterChatId(),
     `⚠️ Draft failed for ${candidate.name} on ${job.job_title} (${channel}). No approval was queued. Check Claude credits/runtime and retry.`,
   ).catch(() => null);
+}
+
+async function getUnsentApprovalKeySet(jobId, channel) {
+  const { data: approvals } = await supabase
+    .from('approval_queue')
+    .select('candidate_id,stage')
+    .eq('job_id', jobId)
+    .eq('channel', channel)
+    .in('status', ['pending', 'edited', 'approved']);
+
+  return new Set((approvals || []).map((approval) => `${approval.candidate_id}:${approval.stage || ''}`));
+}
+
+function approvalKey(candidateId, stage) {
+  return `${candidateId}:${stage || ''}`;
 }
 
 async function incrementDailyLimit(jobId, channel) {
@@ -289,6 +308,7 @@ async function sendAutonomousConnectionRequests(job) {
 
 async function draftFirstDMs(job) {
   const limits = await ensureDailyLimits(job.id);
+  const unsentApprovalKeys = await getUnsentApprovalKeySet(job.id, 'linkedin_dm');
   const pendingApprovals = await supabase
     .from('approval_queue')
     .select('*', { count: 'exact', head: true })
@@ -310,6 +330,9 @@ async function draftFirstDMs(job) {
 
   let draftedCount = 0;
   for (const candidate of candidates || []) {
+    if (unsentApprovalKeys.has(approvalKey(candidate.id, 'dm_sent'))) {
+      continue;
+    }
     // eslint-disable-next-line no-await-in-loop
     const message = await draftMessage(buildTemplateAwarePrompt(job, 'linkedin_dm', `Write a personalized LinkedIn DM.\nCandidate: ${JSON.stringify(candidate)}\nJob: ${JSON.stringify(job)}\nReference something specific from their profile and mention salary if present.`));
     if (!message) {
@@ -332,6 +355,7 @@ async function draftFirstDMs(job) {
 }
 
 async function draftOutboundEmails(job) {
+  const unsentApprovalKeys = await getUnsentApprovalKeySet(job.id, 'email');
   const { data: candidates } = await supabase
     .from('candidates')
     .select('*')
@@ -344,6 +368,9 @@ async function draftOutboundEmails(job) {
 
   let draftedCount = 0;
   for (const candidate of candidates || []) {
+    if (unsentApprovalKeys.has(approvalKey(candidate.id, 'email_sent'))) {
+      continue;
+    }
     // eslint-disable-next-line no-await-in-loop
     const message = await draftMessage(buildTemplateAwarePrompt(job, 'email', `Write a longer-form recruiting email.\nCandidate: ${JSON.stringify(candidate)}\nJob: ${JSON.stringify(job)}\nInclude role, client, salary, and why the role is interesting.`));
     if (!message) continue;
@@ -367,6 +394,8 @@ function nextFollowUpDate(count) {
 }
 
 async function draftFollowUps(job) {
+  const dmApprovalKeys = await getUnsentApprovalKeySet(job.id, 'linkedin_dm');
+  const emailApprovalKeys = await getUnsentApprovalKeySet(job.id, 'email');
   const { data: candidates } = await supabase
     .from('candidates')
     .select('*')
@@ -376,6 +405,12 @@ async function draftFollowUps(job) {
 
   let draftedCount = 0;
   for (const candidate of candidates || []) {
+    const followUpChannel = candidate.pipeline_stage === 'email_sent' ? 'email' : 'linkedin_dm';
+    const approvalKeys = followUpChannel === 'email' ? emailApprovalKeys : dmApprovalKeys;
+    if (approvalKeys.has(approvalKey(candidate.id, candidate.pipeline_stage))) {
+      continue;
+    }
+
     if ((candidate.follow_up_count || 0) >= 3) {
       // eslint-disable-next-line no-await-in-loop
       await supabase.from('candidates').update({
@@ -397,7 +432,7 @@ async function draftFollowUps(job) {
     const approval = await queueApproval({
       candidateId: candidate.id,
       jobId: job.id,
-      channel: candidate.pipeline_stage === 'email_sent' ? 'email' : 'linkedin_dm',
+      channel: followUpChannel,
       stage: candidate.pipeline_stage,
       messageText: message,
     });
@@ -421,7 +456,7 @@ async function checkStuckStages(job) {
 
   const [{ data: staleInvites }, { data: staleQualified }] = await Promise.all([
     supabase.from('candidates').select('*').eq('job_id', job.id).eq('pipeline_stage', 'invite_sent').lte('invite_sent_at', inviteThreshold),
-    supabase.from('candidates').select('*').eq('job_id', job.id).eq('pipeline_stage', 'Qualified').lte('qualified_at', qualifiedThreshold).is('interview_booked_at', null),
+    supabase.from('candidates').select('*').eq('job_id', job.id).lte('qualified_at', qualifiedThreshold).is('interview_booked_at', null).not('qualified_at', 'is', null),
   ]);
 
   for (const candidate of staleInvites || []) {

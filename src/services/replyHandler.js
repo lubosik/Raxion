@@ -174,7 +174,7 @@ export async function processIncomingMessage(webhookPayload) {
 
   await supabase.from('candidates').update({
     last_reply_at: new Date().toISOString(),
-    pipeline_stage: ['Qualified', 'Interview Booked', 'Interview Scheduled', 'Offered', 'Placed'].includes(candidate.pipeline_stage) ? candidate.pipeline_stage : 'Replied',
+    pipeline_stage: ['Interview Booked', 'Interview Scheduled', 'Offered', 'Placed'].includes(candidate.pipeline_stage) ? candidate.pipeline_stage : 'reply_received',
   }).eq('id', candidate.id);
 
   for (const attachment of attachments) {
@@ -234,7 +234,7 @@ export async function processIncomingMessage(webhookPayload) {
     });
   } else if (classification.next_action === 'archive' && shouldQueueArchiveReply) {
     await supabase.from('candidates').update({
-      pipeline_stage: 'Replied',
+      pipeline_stage: 'reply_received',
       follow_up_due_at: null,
       ...clearEndChatRecommendation(candidate),
     }).eq('id', candidate.id);
@@ -259,7 +259,6 @@ export async function processIncomingMessage(webhookPayload) {
 
   if (classification.qualified && classification.intent !== 'booking_confirmed') {
     await supabase.from('candidates').update({
-      pipeline_stage: 'Qualified',
       qualified_at: new Date().toISOString(),
     }).eq('id', candidate.id);
     await logActivity(candidate.job_id, candidate.id, 'CANDIDATE_QUALIFIED', `${candidate.name} qualified from reply`, {
@@ -275,7 +274,7 @@ export async function processIncomingMessage(webhookPayload) {
       candidateId: candidate.id,
       jobId: candidate.job_id,
       channel: 'linkedin_dm',
-      stage: 'Qualified',
+      stage: 'in_conversation',
       messageText: ensureSignedMessage(job, classification.suggested_reply || `Thanks for the reply. You can book a time here: ${job.calendly_link}`),
     });
   } else if (classification.next_action === 'push_for_booking') {
@@ -283,7 +282,7 @@ export async function processIncomingMessage(webhookPayload) {
       candidateId: candidate.id,
       jobId: candidate.job_id,
       channel: 'linkedin_dm',
-      stage: 'Qualified',
+      stage: 'in_conversation',
       messageText: ensureSignedMessage(job, classification.suggested_reply),
     });
   } else if (classification.next_action === 'ask_qualifying_question') {
@@ -291,7 +290,7 @@ export async function processIncomingMessage(webhookPayload) {
       candidateId: candidate.id,
       jobId: candidate.job_id,
       channel: 'linkedin_dm',
-      stage: candidate.pipeline_stage,
+      stage: 'in_conversation',
       messageText: ensureSignedMessage(job, classification.suggested_reply || classification.qualifying_question_to_ask),
     });
   } else if (classification.next_action === 'answer_question' || classification.next_action === 'continue_conversation') {
@@ -299,7 +298,7 @@ export async function processIncomingMessage(webhookPayload) {
       candidateId: candidate.id,
       jobId: candidate.job_id,
       channel: 'linkedin_dm',
-      stage: candidate.pipeline_stage,
+      stage: 'in_conversation',
       messageText: ensureSignedMessage(job, classification.suggested_reply),
     });
   } else if (classification.next_action === 'polite_decline') {

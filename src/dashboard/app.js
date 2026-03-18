@@ -46,8 +46,13 @@
     Enriched: { cls: 'stage-enriched', label: 'Enriched' },
     invite_sent: { cls: 'stage-invite', label: 'Invite Sent' },
     invite_accepted: { cls: 'stage-accepted', label: 'Invite Accepted' },
+    pending_approval: { cls: 'stage-shortlisted', label: 'Pending Approval' },
+    dm_approved: { cls: 'stage-enriched', label: 'DM Approved' },
+    email_approved: { cls: 'stage-enriched', label: 'Email Approved' },
     dm_sent: { cls: 'stage-dm', label: 'DM Sent' },
     email_sent: { cls: 'stage-email', label: 'Email Sent' },
+    reply_received: { cls: 'stage-replied', label: 'Reply Received' },
+    in_conversation: { cls: 'stage-qualified', label: 'In Conversation' },
     Replied: { cls: 'stage-replied', label: 'Replied' },
     Qualified: { cls: 'stage-qualified', label: 'Qualified' },
     Applied: { cls: 'stage-sourced', label: 'Applied' },
@@ -56,6 +61,12 @@
     Archived: { cls: 'stage-archived', label: 'Archived' },
     Withdrawn: { cls: 'stage-withdrawn', label: 'Withdrawn' },
     Placed: { cls: 'stage-placed', label: 'Placed' },
+    pending: { cls: 'stage-shortlisted', label: 'Pending' },
+    edited: { cls: 'stage-enriched', label: 'Edited' },
+    approved: { cls: 'stage-qualified', label: 'Approved' },
+    sent: { cls: 'stage-dm', label: 'Sent' },
+    rejected: { cls: 'stage-rejected', label: 'Rejected' },
+    error: { cls: 'stage-rejected', label: 'Error' },
   };
 
   const JOB_TABS = [
@@ -215,6 +226,22 @@
     return state.jobCandidates[jobId] || [];
   }
 
+  function isActiveApprovalStatus(status) {
+    return ['pending', 'edited', 'approved'].includes(String(status || ''));
+  }
+
+  function hasActiveApproval(approvals, candidateId, channel) {
+    return (approvals || []).some((item) => item.candidate_id === candidateId && item.channel === channel && isActiveApprovalStatus(item.status));
+  }
+
+  function candidateOutreachChannel(candidate) {
+    if (String(candidate?.pipeline_stage || '').includes('email')) return 'Email';
+    const activeApproval = (state.selectedJobApprovals || []).find((item) => item.candidate_id === candidate.id && isActiveApprovalStatus(item.status));
+    if (activeApproval?.channel === 'email') return 'Email';
+    if (activeApproval?.channel === 'linkedin_dm') return 'LinkedIn';
+    return 'LinkedIn';
+  }
+
   function jobSupportsInbound(job) {
     return ['inbound', 'both'].includes(String(job?.job_mode || 'outbound'));
   }
@@ -251,8 +278,8 @@
     return {
       sourced: counts.Sourced || 0,
       shortlisted: candidates.filter(isShortlistedCandidate).length,
-      outreach: (counts.invite_sent || 0) + (counts.invite_accepted || 0) + (counts.dm_sent || 0) + (counts.email_sent || 0),
-      replies: (counts.Replied || 0) + (counts.Qualified || 0),
+      outreach: (counts.invite_sent || 0) + (counts.invite_accepted || 0) + (counts.pending_approval || 0) + (counts.dm_approved || 0) + (counts.email_approved || 0) + (counts.dm_sent || 0) + (counts.email_sent || 0),
+      replies: (counts.reply_received || 0) + (counts.Replied || 0) + (counts.in_conversation || 0) + (counts.Qualified || 0),
     };
   }
 
@@ -607,8 +634,8 @@
           `<td>${stageChip(candidate.pipeline_stage)}</td>` +
           `<td><span class="enrichment-mark ${candidate.enrichment_status === 'Enriched' ? 'good' : candidate.enrichment_status === 'No Data' ? 'empty' : candidate.enrichment_status === 'Failed' ? 'bad' : 'pending'}"></span></td>` +
           (archived ? `<td>${esc((candidate.notes || '').slice(0, 80) || 'Archived')}</td>` : '') +
-          (outreach ? `<td>${esc(candidate.pipeline_stage.includes('email') ? 'Email' : 'LinkedIn')}</td><td>${esc(formatTime(candidateLastAction(candidate)))}</td><td>${esc(formatTime(candidate.follow_up_due_at))}</td>` : '') +
-          (replies ? `<td>${esc(((state.inbox.find((item) => item.candidate_id === candidate.id) || {}).message_text || '').slice(0, 80) || 'No reply summary')}</td><td>${candidate.pipeline_stage === 'Qualified' ? '<span class="stage-chip stage-qualified">Yes</span>' : '<span class="stage-chip stage-sourced">No</span>'}</td><td>${stageChip(candidate.pipeline_stage)}</td>` : '') +
+          (outreach ? `<td>${esc(candidateOutreachChannel(candidate))}</td><td>${esc(formatTime(candidateLastAction(candidate)))}</td><td>${esc(formatTime(candidate.follow_up_due_at))}</td>` : '') +
+          (replies ? `<td>${esc(((state.inbox.find((item) => item.candidate_id === candidate.id) || {}).message_text || '').slice(0, 80) || 'No reply summary')}</td><td>${candidate.qualified_at ? '<span class="stage-chip stage-qualified">Yes</span>' : '<span class="stage-chip stage-sourced">No</span>'}</td><td>${stageChip(candidate.pipeline_stage)}</td>` : '') +
           `<td>${esc(formatTime(candidateLastAction(candidate)))}</td>` +
           `<td><div class="button-row">${profileButton(candidate.linkedin_url)}<button class="btn btn-secondary btn-sm" data-action="${archived ? 'reinstate-candidate' : 'archive-candidate'}" data-id="${esc(candidate.id)}">${archived ? 'Reinstate' : 'Archive'}</button></div></td>` +
         '</tr>'
@@ -636,7 +663,7 @@
         `<td>${scorePill(candidate.fit_score)}</td>` +
         `<td><span class="stage-chip ${gradeClass(candidate.fit_grade)}">${esc(candidate.fit_grade || 'UNRATED')}</span></td>` +
         `<td>${candidate.resume_text ? '<span class="stage-chip stage-enriched">Parsed</span>' : '<span class="stage-chip stage-sourced">None</span>'}</td>` +
-        `<td>${candidate.reply_sent ? '<span class="stage-chip stage-qualified">Sent</span>' : state.selectedJobApprovals.some((item) => item.candidate_id === candidate.id && item.channel === 'email') ? '<span class="stage-chip stage-enriched">Pending</span>' : '<span class="stage-chip stage-sourced">Not queued</span>'}</td>` +
+        `<td>${candidate.reply_sent ? '<span class="stage-chip stage-qualified">Sent</span>' : hasActiveApproval(state.selectedJobApprovals, candidate.id, 'email') ? '<span class="stage-chip stage-enriched">Pending</span>' : '<span class="stage-chip stage-sourced">Not queued</span>'}</td>` +
         `<td>${candidate.interview_scheduled ? '<span class="stage-chip stage-qualified">Scheduled</span>' : '<span class="stage-chip stage-sourced">Not scheduled</span>'}</td>` +
         `<td><div class="button-row"><button class="btn btn-secondary btn-sm" data-action="open-candidate" data-id="${esc(candidate.id)}">View</button><button class="btn btn-secondary btn-sm" data-action="queue-applicant-reply" data-id="${esc(candidate.id)}">Reply</button><button class="btn btn-secondary btn-sm" data-action="schedule-interview" data-id="${esc(candidate.id)}">Schedule Interview</button><button class="btn btn-danger btn-sm" data-action="archive-candidate" data-id="${esc(candidate.id)}">Archive</button></div></td>` +
       '</tr>'
@@ -653,8 +680,8 @@
     const applicants = state.selectedJobApplicants || [];
     const shortlisted = all.filter(isShortlistedCandidate);
     const ranked = [...all].sort((a, b) => Number(b.fit_score || 0) - Number(a.fit_score || 0));
-    const outreach = all.filter((candidate) => ['invite_sent', 'invite_accepted', 'dm_sent', 'email_sent'].includes(candidate.pipeline_stage));
-    const replies = all.filter((candidate) => ['Replied', 'Qualified'].includes(candidate.pipeline_stage));
+    const outreach = all.filter((candidate) => ['invite_sent', 'invite_accepted', 'pending_approval', 'dm_approved', 'email_approved', 'dm_sent', 'email_sent'].includes(candidate.pipeline_stage));
+    const replies = all.filter((candidate) => ['reply_received', 'Replied', 'in_conversation', 'Qualified'].includes(candidate.pipeline_stage));
     const archived = all.filter((candidate) => ['Archived', 'Rejected', 'Withdrawn'].includes(candidate.pipeline_stage));
     const templates = parseTemplates(job.outreach_templates);
     const metrics = job.metrics || {};
@@ -672,7 +699,7 @@
             `<div class="metric-card strip-card"><div class="metric-number">${percent(metrics.invites_accepted, metrics.invites_sent)}</div><div class="metric-caption">Acceptance Rate</div></div>` +
             `<div class="metric-card strip-card"><div class="metric-number">${metrics.emails_sent || 0}</div><div class="metric-caption">Emails Sent</div></div>` +
             `<div class="metric-card strip-card"><div class="metric-number">${percent(metrics.email_replies, metrics.emails_sent)}</div><div class="metric-caption">Email Reply Rate</div></div>` +
-            `<div class="metric-card strip-card"><div class="metric-number">${metrics.approval_queue_count || 0}</div><div class="metric-caption">Pending Approvals</div></div>` +
+            `<div class="metric-card strip-card"><div class="metric-number">${metrics.approval_queue_count || 0}</div><div class="metric-caption">Queued Approvals</div></div>` +
           '</div>' +
           '<div class="surface">' +
             '<div class="section-head"><div><div class="label-caps">Pipeline Snapshot</div><h2 class="section-title">Stage Breakdown</h2></div></div>' +
@@ -720,7 +747,7 @@
       );
     } else if (state.selectedJobTab === 'applicants') {
       const shortlistedApplicants = applicants.filter((candidate) => ['HOT', 'WARM'].includes(candidate.fit_grade));
-      const repliedApplicants = applicants.filter((candidate) => candidate.reply_sent || state.selectedJobApprovals.some((item) => item.candidate_id === candidate.id && item.channel === 'email'));
+      const repliedApplicants = applicants.filter((candidate) => candidate.reply_sent || hasActiveApproval(state.selectedJobApprovals, candidate.id, 'email'));
       const interviewsScheduled = applicants.filter((candidate) => candidate.interview_scheduled);
       content = (
         '<section class="view-section">' +
@@ -850,14 +877,14 @@
   function renderApprovals() {
     const cards = (state.approvals || []).map((item) => {
       const faded = item._faded ? ' approval-faded' : '';
-      const actions = ['approved', 'sent'].includes(item.status)
-        ? `<div class="approval-approved"><span class="stage-chip stage-qualified">✓ ${esc(item.status === 'sent' ? 'Sent' : 'Approved')}</span></div>`
+      const actions = ['approved', 'sent', 'rejected', 'error'].includes(item.status)
+        ? `<div class="approval-approved"><span class="stage-chip ${stageInfo(item.status).cls}">${esc(stageInfo(item.status).label)}</span></div>`
         : `<div class="button-row"><button class="btn btn-success btn-sm" data-action="approve-approval" data-id="${esc(item.id)}">✓ Approve</button><button class="btn btn-secondary btn-sm" data-action="edit-approval" data-id="${esc(item.id)}">✎ Edit</button><button class="btn btn-danger btn-sm" data-action="skip-approval" data-id="${esc(item.id)}">✗ Skip</button></div>`;
       return (
         `<article class="approval-card${faded}">` +
           `<div class="approval-card-head"><div class="approval-type ${item.channel === 'linkedin_dm' ? 'approval-dm' : item.channel === 'email' ? 'approval-email' : 'approval-followup'}">${esc(item.channel === 'linkedin_dm' ? 'LINKEDIN DM' : item.channel === 'email' ? 'EMAIL' : item.channel.toUpperCase())}</div><div class="approval-meta">${esc(formatTime(item.created_at))} ${stageChip(item.status)}</div></div>` +
           `<div class="approval-person">${esc(item.candidates?.name || 'Unknown')}</div>` +
-          `<div class="candidate-sub">${esc(item.candidates?.current_title || 'No title')} · ${esc(item.candidates?.current_company || 'No company')}</div>` +
+          `<div class="candidate-sub">${esc(item.candidates?.current_title || 'No title')} · ${esc(item.candidates?.current_company || 'No company')} · ${esc(item.jobs?.job_title || 'Unknown job')}</div>` +
           `<blockquote class="approval-message">${esc(item.message_text || '')}</blockquote>` +
           actions +
         '</article>'
@@ -909,7 +936,7 @@
       '<section class="view-section">' +
         '<div class="metric-strip">' +
           `<div class="metric-card strip-card"><div class="metric-number">${esc(runtime.raxionStatus || 'ACTIVE')}</div><div class="metric-caption">System Status</div></div>` +
-          `<div class="metric-card strip-card"><div class="metric-number">${health.pending_approvals || 0}</div><div class="metric-caption">Pending Approvals</div></div>` +
+          `<div class="metric-card strip-card"><div class="metric-number">${health.pending_approvals || 0}</div><div class="metric-caption">Queued Approvals</div></div>` +
           `<div class="metric-card strip-card"><div class="metric-number">${health.webhook_events_logged || 0}</div><div class="metric-caption">Webhook Events</div></div>` +
           `<div class="metric-card strip-card"><div class="metric-number">${executionQueue.active?.length || 0}/${executionQueue.concurrency || 1}</div><div class="metric-caption">Active Jobs</div></div>` +
           `<div class="metric-card strip-card"><div class="metric-number">${executionQueue.pending?.length || 0}</div><div class="metric-caption">Queued Jobs</div></div>` +
@@ -1070,6 +1097,16 @@
       const target = items.find((item) => item.id === approvalId);
       if (target) {
         target.status = status;
+        if (status === 'approved') {
+          const channelStage = target.channel === 'email' ? 'email_approved' : target.channel === 'linkedin_dm' ? 'dm_approved' : null;
+          const candidateCollections = [state.jobCandidates[target.job_id], state.selectedJobCandidates, state.candidatePanelDetail ? [state.candidatePanelDetail] : []].filter(Boolean);
+          candidateCollections.forEach((candidates) => {
+            const candidate = candidates.find((item) => item.id === target.candidate_id);
+            if (candidate && channelStage) {
+              candidate.pipeline_stage = channelStage;
+            }
+          });
+        }
         target._faded = false;
         setTimeout(() => {
           target._faded = true;

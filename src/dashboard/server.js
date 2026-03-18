@@ -172,14 +172,14 @@ export function createDashboardServer() {
     const [jobs, sourced, outreach, invites, accepted, replies, qualified, interviews, placements, approvals, emailsSent, emailReplies] = await Promise.all([
       supabase.from('jobs').select('*', { count: 'exact', head: true }).eq('status', 'ACTIVE'),
       supabase.from('candidates').select('*', { count: 'exact', head: true }),
-      supabase.from('candidates').select('*', { count: 'exact', head: true }).in('pipeline_stage', ['invite_sent', 'invite_accepted', 'dm_sent', 'email_sent', 'Replied', 'Qualified', 'Interview Booked', 'Interview Scheduled', 'Offered', 'Placed']),
+      supabase.from('candidates').select('*', { count: 'exact', head: true }).in('pipeline_stage', ['invite_sent', 'invite_accepted', 'pending_approval', 'dm_approved', 'email_approved', 'dm_sent', 'email_sent', 'reply_received', 'Replied', 'in_conversation', 'Interview Booked', 'Interview Scheduled', 'Offered', 'Placed']),
       supabase.from('candidates').select('*', { count: 'exact', head: true }).not('invite_sent_at', 'is', null),
       supabase.from('candidates').select('*', { count: 'exact', head: true }).not('invite_accepted_at', 'is', null),
       supabase.from('candidates').select('*', { count: 'exact', head: true }).not('last_reply_at', 'is', null),
-      supabase.from('candidates').select('*', { count: 'exact', head: true }).eq('pipeline_stage', 'Qualified'),
+      supabase.from('candidates').select('*', { count: 'exact', head: true }).not('qualified_at', 'is', null),
       supabase.from('candidates').select('*', { count: 'exact', head: true }).not('interview_booked_at', 'is', null),
       supabase.from('candidates').select('*', { count: 'exact', head: true }).eq('pipeline_stage', 'Placed'),
-      supabase.from('approval_queue').select('*', { count: 'exact', head: true }).in('status', ['pending', 'edited']),
+      supabase.from('approval_queue').select('*', { count: 'exact', head: true }).in('status', ['pending', 'edited', 'approved']),
       supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('direction', 'outbound').eq('channel', 'email'),
       supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('direction', 'inbound').eq('channel', 'email'),
     ]);
@@ -221,7 +221,7 @@ export function createDashboardServer() {
   app.get('/api/health', async (req, res) => {
     const [{ count: webhookCount }, { count: queueCount }, state, integrationHealth, executionQueue] = await Promise.all([
       supabase.from('webhook_logs').select('*', { count: 'exact', head: true }),
-      supabase.from('approval_queue').select('*', { count: 'exact', head: true }).in('status', ['pending', 'edited']),
+      supabase.from('approval_queue').select('*', { count: 'exact', head: true }).in('status', ['pending', 'edited', 'approved']),
       getRuntimeState(),
       getIntegrationHealth(req.query.refresh === 'true'),
       getExecutionQueueSnapshot(),
@@ -491,7 +491,6 @@ export function createDashboardServer() {
       .from('approval_queue')
       .select('*, candidates(name, current_title, current_company, fit_score, fit_grade), jobs(*)')
       .eq('job_id', req.params.id)
-      .in('status', ['pending', 'edited', 'approved'])
       .order('created_at', { ascending: false });
     res.json((data || []).map((row) => ({ ...normalizeApprovalRecord(row), jobs: normalizeJobRecord(row.jobs) })));
   });
@@ -501,7 +500,7 @@ export function createDashboardServer() {
       supabase.from('candidates').select('*').eq('id', req.params.id).single(),
       supabase.from('conversations').select('*').eq('candidate_id', req.params.id).order('sent_at', { ascending: true }),
       supabase.from('activity_log').select('*').eq('candidate_id', req.params.id).order('created_at', { ascending: false }),
-      supabase.from('approval_queue').select('*').eq('candidate_id', req.params.id).in('status', ['pending', 'edited', 'approved']).order('created_at', { ascending: false }),
+      supabase.from('approval_queue').select('*').eq('candidate_id', req.params.id).order('created_at', { ascending: false }),
     ]);
     res.json({ ...normalizeCandidateRecord(candidate), conversation_history: (conversations || []).map(normalizeConversationRecord), activity_log: activity || [], approvals: (approvals || []).map(normalizeApprovalRecord) });
   });
@@ -608,7 +607,6 @@ export function createDashboardServer() {
     const { data } = await supabase
       .from('approval_queue')
       .select('*, candidates(name, current_title, current_company, fit_score, fit_grade), jobs(*)')
-      .in('status', ['pending', 'edited', 'approved'])
       .order('created_at', { ascending: false });
     res.json((data || []).map((row) => ({ ...normalizeApprovalRecord(row), jobs: normalizeJobRecord(row.jobs) })));
   });

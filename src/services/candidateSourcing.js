@@ -186,11 +186,16 @@ function stageRank(stage) {
     Enriched: 3,
     invite_sent: 4,
     invite_accepted: 5,
-    dm_sent: 6,
-    email_sent: 6,
-    Replied: 7,
-    Qualified: 8,
-    Placed: 9,
+    pending_approval: 6,
+    dm_approved: 7,
+    email_approved: 7,
+    dm_sent: 8,
+    email_sent: 8,
+    reply_received: 9,
+    Replied: 9,
+    in_conversation: 10,
+    Qualified: 11,
+    Placed: 12,
   };
   return ranking[stage] ?? 0;
 }

@@ -16,6 +16,26 @@ import { isConversationEnded, markConversationEnded } from './conversationState.
 
 const UNSENT_APPROVAL_STATUSES = ['pending', 'edited', 'approved'];
 
+function getPendingApprovalPipelineStage(channel) {
+  if (['linkedin_dm', 'email'].includes(channel)) return 'pending_approval';
+  return null;
+}
+
+function getApprovedPipelineStage(channel, fallbackStage) {
+  if (channel === 'linkedin_dm') return 'dm_approved';
+  if (channel === 'email') return 'email_approved';
+  return fallbackStage || null;
+}
+
+function getRejectedPipelineStage(approval, candidate) {
+  if (approval.stage === 'dm_sent' && approval.channel === 'linkedin_dm') return 'invite_accepted';
+  if (approval.stage === 'email_sent' && approval.channel === 'email') return 'Enriched';
+  if (approval.stage === 'in_conversation') return 'reply_received';
+  if (approval.stage === 'Applicant Reply Email') return candidate?.qualified_at ? 'Qualified' : 'Applied';
+  if (approval.stage === 'Archived') return candidate?.last_reply_at ? 'reply_received' : candidate?.pipeline_stage || null;
+  return candidate?.pipeline_stage === 'pending_approval' ? null : candidate?.pipeline_stage || null;
+}
+
 export function validateDraftMessage(content, candidate) {
   if (!content || typeof content !== 'string' || content.trim() === '') {
     throw new Error('Message content is empty');
@@ -291,6 +311,12 @@ export async function queueApproval({ candidateId, jobId, messageText, channel, 
         approval_id: updated?.id || existing.id,
         stage,
       });
+      const pendingApprovalStage = getPendingApprovalPipelineStage(channel);
+      if (pendingApprovalStage) {
+        await supabase.from('candidates').update({
+          pipeline_stage: pendingApprovalStage,
+        }).eq('id', candidateId);
+      }
       return updated || existing;
     }
     return existing;
@@ -307,6 +333,13 @@ export async function queueApproval({ candidateId, jobId, messageText, channel, 
   })).select('*').single();
   if (error || !approval) return null;
   const normalizedApproval = normalizeApprovalRecord(approval);
+
+  const pendingApprovalStage = getPendingApprovalPipelineStage(channel);
+  if (pendingApprovalStage) {
+    await supabase.from('candidates').update({
+      pipeline_stage: pendingApprovalStage,
+    }).eq('id', candidateId);
+  }
 
   try {
     await deliverApprovalTelegramCard(normalizedApproval, candidate, normalizedJob);
@@ -382,6 +415,14 @@ export async function approveQueuedMessage(approvalId) {
     status: 'approved',
     approved_at: new Date().toISOString(),
   })).eq('id', approvalId).select('*').single();
+
+  const approvedPipelineStage = getApprovedPipelineStage(approval.channel, approval.stage);
+  if (approvedPipelineStage) {
+    await supabase.from('candidates').update({
+      pipeline_stage: approvedPipelineStage,
+    }).eq('id', approval.candidate_id);
+  }
+
   await logActivity(approval.job_id, approval.candidate_id, 'MESSAGE_APPROVED', `Recruiter approved ${approval.channel}`, {
     approval_id: approvalId,
     channel: approval.channel,
@@ -536,9 +577,20 @@ export async function editQueuedMessage(approvalId, messageText) {
 }
 
 export async function skipQueuedMessage(approvalId) {
+  const { data: rawExisting } = await supabase.from('approval_queue').select('*').eq('id', approvalId).single();
+  const existing = normalizeApprovalRecord(rawExisting);
+  if (!existing) return null;
+
+  const { candidate } = await getApprovalContext(existing);
   const { data: approval } = await supabase.from('approval_queue').update(await prepareApprovalUpdatePayload({ status: 'rejected' })).eq('id', approvalId).select('*').single();
   if (!approval) return null;
   const normalizedApproval = normalizeApprovalRecord(approval);
+  const rejectedPipelineStage = getRejectedPipelineStage(normalizedApproval, candidate);
+  if (rejectedPipelineStage) {
+    await supabase.from('candidates').update({
+      pipeline_stage: rejectedPipelineStage,
+    }).eq('id', normalizedApproval.candidate_id);
+  }
   await logActivity(approval.job_id, approval.candidate_id, 'MESSAGE_SKIPPED', `Skipped queued ${normalizedApproval.channel} message`, { approval_id: approvalId });
   await syncApprovalTelegramCard(normalizedApproval);
   return normalizedApproval;
