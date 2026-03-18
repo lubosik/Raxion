@@ -8,6 +8,7 @@ export async function processEnrichmentQueue(jobId = null) {
     .from('candidates')
     .select('*')
     .eq('enrichment_status', 'Pending')
+    .neq('fit_grade', 'INVALID')
     .in('pipeline_stage', ['Shortlisted', 'Enriched', 'invite_sent', 'invite_accepted']);
 
   if (jobId) query = query.eq('job_id', jobId);

@@ -42,7 +42,15 @@ function withQuery(path, params = {}) {
   return url;
 }
 
-async function request(path, { method = 'GET', body, headers = {}, isMultipart = false, returnBuffer = false, query } = {}) {
+async function request(path, {
+  method = 'GET',
+  body,
+  headers = {},
+  isMultipart = false,
+  returnBuffer = false,
+  query,
+  allowErrorResponse = false,
+} = {}) {
   const baseUrl = getBaseUrl();
   const apiKey = getApiKey();
   if (!baseUrl || !apiKey) {
@@ -62,7 +70,14 @@ async function request(path, { method = 'GET', body, headers = {}, isMultipart =
     });
 
     if (!response.ok) {
-      console.error('[unipile] request failed', { path, method, status: response.status, body: await response.text() });
+      const responseBody = await response.text();
+      console.error('[unipile] request failed', { path, method, status: response.status, body: responseBody });
+      if (allowErrorResponse) {
+        return {
+          error: responseBody || `HTTP ${response.status}`,
+          status: response.status,
+        };
+      }
       return null;
     }
 
@@ -193,7 +208,76 @@ export async function sendConnectionRequest(providerId, message) {
   return request('/users/invite', {
     method: 'POST',
     body: payload,
+    allowErrorResponse: true,
   });
+}
+
+function normalizeLinkedInUrl(url) {
+  return String(url || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\/(www\.)?/, '')
+    .replace(/[?#].*$/, '')
+    .replace(/\/+$/, '');
+}
+
+function extractLinkedInPublicIdentifier(linkedinUrl) {
+  const match = String(linkedinUrl || '').match(/linkedin\.com\/in\/([^/?#]+)/i);
+  return match ? decodeURIComponent(match[1]).trim().toLowerCase() : null;
+}
+
+export async function resolveLinkedInProviderId(linkedinUrl) {
+  const publicIdentifier = extractLinkedInPublicIdentifier(linkedinUrl);
+  if (!publicIdentifier) return null;
+
+  const keywords = publicIdentifier.replace(/[-_]+/g, ' ');
+  const results = await searchLinkedInPeople({
+    keywords,
+    network_distance: [1, 2, 3],
+  });
+
+  const normalizedTargetUrl = normalizeLinkedInUrl(linkedinUrl);
+  const exactMatch = (results || []).find((item) => {
+    const itemUrl = item.profile_url || item.linkedin_url || (item.public_identifier ? `https://www.linkedin.com/in/${item.public_identifier}` : null);
+    return normalizeLinkedInUrl(itemUrl) === normalizedTargetUrl;
+  });
+  if (exactMatch?.provider_id || exactMatch?.id) {
+    return exactMatch.provider_id || exactMatch.id;
+  }
+
+  const identifierMatch = (results || []).find((item) => String(item.public_identifier || '').trim().toLowerCase() === publicIdentifier);
+  return identifierMatch?.provider_id || identifierMatch?.id || null;
+}
+
+export async function checkLinkedInConnectionStatus(providerId) {
+  const baseUrl = getBaseUrl();
+  const apiKey = getApiKey();
+  const linkedinAccountId = getLinkedinAccountId();
+  if (!baseUrl || !apiKey || !linkedinAccountId || !providerId) return 'unknown';
+
+  const url = new URL(`${baseUrl}/users/${encodeURIComponent(providerId)}`);
+  url.searchParams.set('account_id', linkedinAccountId);
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'X-API-KEY': apiKey,
+      },
+    });
+
+    if (!response.ok) {
+      if (response.status === 404) return 'not_found';
+      return 'unknown';
+    }
+
+    const profile = await response.json();
+    if (profile?.distance === 1 || profile?.is_connected === true) return 'connected';
+    if (profile?.invitation_sent === true || profile?.pending_invitation === true) return 'pending';
+    return 'not_connected';
+  } catch (error) {
+    console.error('[unipile] connection status lookup failed', { providerId, error: error.message });
+    return 'unknown';
+  }
 }
 
 export async function startLinkedInDM(providerId, message) {

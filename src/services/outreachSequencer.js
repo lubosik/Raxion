@@ -1,13 +1,13 @@
 import supabase from '../db/supabase.js';
 import { callClaude } from '../integrations/claude.js';
-import { sendConnectionRequest } from '../integrations/unipile.js';
+import { checkLinkedInConnectionStatus, resolveLinkedInProviderId, sendConnectionRequest } from '../integrations/unipile.js';
 import { getRuntimeConfigValue } from './configService.js';
 import { sendTelegramMessage, getRecruiterChatId } from '../integrations/telegram.js';
 import { sleep, todayIsoDate } from '../lib_utils.js';
 import { queueApproval, executeApprovedSends } from './approvalService.js';
 import { logActivity, logActivityOncePerWindow } from './activityLogger.js';
 import { processEnrichmentQueue } from './enrichmentService.js';
-import { sourceCandidatesForJob, scoreUnscoredCandidates } from './candidateSourcing.js';
+import { isValidCandidate, sourceCandidatesForJob, scoreUnscoredCandidates } from './candidateSourcing.js';
 import { getRuntimeState } from './runtimeState.js';
 import { getChannelWindow, isWithinSendingWindow } from './scheduleService.js';
 import { buildTemplateAwarePrompt, parseTemplates } from './outreachTemplates.js';
@@ -86,6 +86,178 @@ function getNumericRuntimeValue(key, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function displayCandidateName(candidate) {
+  const name = String(candidate?.name || '').trim();
+  if (!name || ['linkedin member', 'null'].includes(name.toLowerCase())) {
+    return 'unknown name';
+  }
+  return name;
+}
+
+function buildInviteLogDetail(candidate, error = null) {
+  return {
+    candidate_name: displayCandidateName(candidate),
+    current_title: candidate.current_title || 'unknown title',
+    current_company: candidate.current_company || 'unknown company',
+    linkedin_url: candidate.linkedin_url || null,
+    provider_id: candidate.linkedin_provider_id || null,
+    error: error || null,
+  };
+}
+
+async function archiveInvalidCandidate(candidate, job, reason) {
+  await supabase.from('candidates').update({
+    pipeline_stage: 'Archived',
+    fit_grade: 'INVALID',
+    notes: `Auto-archived: ${reason}`,
+    enrichment_status: 'Skipped',
+  }).eq('id', candidate.id);
+
+  await logActivity(
+    job.id,
+    candidate.id,
+    'CANDIDATE_ARCHIVED',
+    `[${job.job_title}]: ${displayCandidateName(candidate)} auto-archived - ${reason}`,
+    {
+      ...buildInviteLogDetail(candidate),
+      reason,
+    },
+  );
+}
+
+async function sendLinkedInConnectionRequest(candidate, job) {
+  const validation = isValidCandidate(candidate);
+  if (!validation.valid) {
+    await archiveInvalidCandidate(candidate, job, validation.reason === 'no_name' ? 'no_valid_name' : 'no_valid_linkedin');
+    return { success: false, reason: validation.reason === 'no_name' ? 'archived_no_name' : 'archived_no_linkedin' };
+  }
+
+  if (!candidate.linkedin_provider_id) {
+    const resolvedProviderId = await resolveLinkedInProviderId(candidate.linkedin_url);
+    if (!resolvedProviderId) {
+      await archiveInvalidCandidate(candidate, job, 'provider_id_not_resolved');
+      return { success: false, reason: 'archived_no_provider_id' };
+    }
+
+    await supabase.from('candidates').update({ linkedin_provider_id: resolvedProviderId }).eq('id', candidate.id);
+    candidate.linkedin_provider_id = resolvedProviderId;
+  }
+
+  try {
+    const connectionStatus = await checkLinkedInConnectionStatus(candidate.linkedin_provider_id);
+
+    if (connectionStatus === 'connected') {
+      await supabase.from('candidates').update({
+        pipeline_stage: 'invite_accepted',
+        invite_sent_at: candidate.invite_sent_at || new Date().toISOString(),
+        invite_accepted_at: new Date().toISOString(),
+        notes: [candidate.notes, 'Already connected on LinkedIn - skipped invite'].filter(Boolean).join(' | '),
+      }).eq('id', candidate.id);
+
+      await logActivity(
+        job.id,
+        candidate.id,
+        'ALREADY_CONNECTED',
+        `[${job.job_title}]: Already connected with ${displayCandidateName(candidate)} on LinkedIn - moved to DM stage`,
+        buildInviteLogDetail(candidate),
+      );
+      return { success: true, reason: 'already_connected' };
+    }
+
+    if (connectionStatus === 'pending') {
+      await logActivity(
+        job.id,
+        candidate.id,
+        'INVITE_PENDING',
+        `[${job.job_title}]: Connection request to ${displayCandidateName(candidate)} is still pending - no resend`,
+        buildInviteLogDetail(candidate),
+      );
+      return { success: true, reason: 'invite_already_pending' };
+    }
+
+    if (connectionStatus === 'not_found') {
+      await archiveInvalidCandidate(candidate, job, 'linkedin_profile_not_found');
+      return { success: false, reason: 'archived_profile_not_found' };
+    }
+  } catch (error) {
+    console.warn(`[INVITE] Could not check connection status for ${candidate.name}: ${error.message}`);
+  }
+
+  try {
+    const result = await sendConnectionRequest(candidate.linkedin_provider_id);
+    if (!result || result.error) {
+      const errorMessage = String(result?.error || 'no result returned');
+      const normalizedError = errorMessage.toLowerCase();
+
+      if (normalizedError.includes('already_connected') || normalizedError.includes('already connected')) {
+        await supabase.from('candidates').update({
+          pipeline_stage: 'invite_accepted',
+          invite_sent_at: candidate.invite_sent_at || new Date().toISOString(),
+          invite_accepted_at: new Date().toISOString(),
+        }).eq('id', candidate.id);
+
+        await logActivity(
+          job.id,
+          candidate.id,
+          'ALREADY_CONNECTED',
+          `[${job.job_title}]: Already connected with ${displayCandidateName(candidate)} - moved to DM stage`,
+          buildInviteLogDetail(candidate, errorMessage),
+        );
+        return { success: true, reason: 'already_connected' };
+      }
+
+      if (normalizedError.includes('pending') || normalizedError.includes('invitation_pending')) {
+        await logActivity(
+          job.id,
+          candidate.id,
+          'INVITE_PENDING',
+          `[${job.job_title}]: Invite to ${displayCandidateName(candidate)} is already pending - no action needed`,
+          buildInviteLogDetail(candidate, errorMessage),
+        );
+        return { success: true, reason: 'invite_already_pending' };
+      }
+
+      if (normalizedError.includes('profile_not_found') || normalizedError.includes('does not exist') || normalizedError.includes('invalid_profile')) {
+        await archiveInvalidCandidate(candidate, job, 'linkedin_profile_not_found');
+        return { success: false, reason: 'archived_profile_not_found' };
+      }
+
+      await logActivity(
+        job.id,
+        candidate.id,
+        'INVITE_SEND_ERROR',
+        `[${job.job_title}]: Failed to send invite to ${displayCandidateName(candidate)} (${candidate.current_title || 'unknown title'}) at ${candidate.current_company || 'unknown company'} - ${errorMessage}`,
+        buildInviteLogDetail(candidate, errorMessage),
+      );
+      return { success: false, reason: errorMessage };
+    }
+
+    await supabase.from('candidates').update({
+      pipeline_stage: 'invite_sent',
+      invite_sent_at: new Date().toISOString(),
+    }).eq('id', candidate.id);
+
+    await logActivity(
+      job.id,
+      candidate.id,
+      'INVITE_SENT',
+      `[${job.job_title}]: Connection request sent to ${displayCandidateName(candidate)} (${candidate.current_title || 'unknown title'}) at ${candidate.current_company || 'unknown company'}`,
+      buildInviteLogDetail(candidate),
+    );
+
+    return { success: true };
+  } catch (error) {
+    await logActivity(
+      job.id,
+      candidate.id,
+      'INVITE_SEND_ERROR',
+      `[${job.job_title}]: Exception sending invite to ${displayCandidateName(candidate)} (${candidate.current_title || 'unknown title'}) at ${candidate.current_company || 'unknown company'} - ${error.message}`,
+      buildInviteLogDetail(candidate, error.message),
+    );
+    return { success: false, reason: error.message };
+  }
+}
+
 async function sendAutonomousConnectionRequests(job) {
   const limits = await ensureDailyLimits(job.id);
   const remaining = Math.max(0, (job.linkedin_daily_limit || 28) - (limits?.invites_sent || 0));
@@ -97,39 +269,18 @@ async function sendAutonomousConnectionRequests(job) {
     .eq('job_id', job.id)
     .eq('pipeline_stage', 'Shortlisted')
     .in('fit_grade', ['HOT', 'WARM'])
+    .not('fit_grade', 'eq', 'INVALID')
     .order('fit_score', { ascending: false })
     .limit(remaining);
 
   let sentCount = 0;
   for (const candidate of candidates || []) {
-    if (!candidate.linkedin_provider_id) {
-      // eslint-disable-next-line no-await-in-loop
-      await logActivity(job.id, candidate.id, 'INVITE_SEND_ERROR', `Missing LinkedIn provider id for ${candidate.name}`, {});
-      continue;
-    }
-
-    try {
-      // eslint-disable-next-line no-await-in-loop
-      const result = await sendConnectionRequest(candidate.linkedin_provider_id);
-      if (!result) throw new Error('Unipile send returned no result');
-
-      // eslint-disable-next-line no-await-in-loop
-      await supabase.from('candidates').update({
-        pipeline_stage: 'invite_sent',
-        invite_sent_at: new Date().toISOString(),
-      }).eq('id', candidate.id);
-
+    // eslint-disable-next-line no-await-in-loop
+    const result = await sendLinkedInConnectionRequest(candidate, job);
+    if (result.success && result.reason !== 'already_connected' && result.reason !== 'invite_already_pending') {
       // eslint-disable-next-line no-await-in-loop
       await incrementDailyLimit(job.id, 'connection_request');
-      // eslint-disable-next-line no-await-in-loop
-      await logActivity(job.id, candidate.id, 'INVITE_SENT', `Connection request sent to ${candidate.name}`, {
-        channel: 'connection_request',
-        autonomous: true,
-      });
       sentCount += 1;
-    } catch (error) {
-      // eslint-disable-next-line no-await-in-loop
-      await logActivity(job.id, candidate.id, 'INVITE_SEND_ERROR', `Failed to send connection request to ${candidate.name}: ${error.message}`, {});
     }
   }
 
@@ -153,6 +304,7 @@ async function draftFirstDMs(job) {
     .select('*')
     .eq('job_id', job.id)
     .eq('pipeline_stage', 'invite_accepted')
+    .neq('fit_grade', 'INVALID')
     .order('fit_score', { ascending: false })
     .limit(remaining);
 
@@ -185,6 +337,7 @@ async function draftOutboundEmails(job) {
     .select('*')
     .eq('job_id', job.id)
     .eq('pipeline_stage', 'Enriched')
+    .neq('fit_grade', 'INVALID')
     .not('email', 'is', null)
     .order('fit_score', { ascending: false })
     .limit(25);

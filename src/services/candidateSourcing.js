@@ -100,6 +100,47 @@ function normalizeScoreResult(scoreResult) {
   };
 }
 
+export function isValidCandidate(candidate) {
+  const normalizedName = String(candidate?.name || '').trim().toLowerCase();
+  const linkedinUrl = String(candidate?.linkedin_url || '').trim().toLowerCase();
+
+  if (!normalizedName || normalizedName === 'linkedin member' || normalizedName === 'null') {
+    return { valid: false, reason: 'no_name' };
+  }
+
+  if (!linkedinUrl || !linkedinUrl.includes('linkedin.com/in/')) {
+    return { valid: false, reason: 'no_linkedin' };
+  }
+
+  if (linkedinUrl.includes('linkedin.com/search') || linkedinUrl.includes('linkedin.com/company')) {
+    return { valid: false, reason: 'invalid_linkedin_url' };
+  }
+
+  return { valid: true };
+}
+
+function applyInvalidCandidateState(candidate, reason) {
+  return {
+    ...candidate,
+    pipeline_stage: 'Archived',
+    fit_grade: 'INVALID',
+    notes: `Auto-archived: ${reason}`,
+    enrichment_status: 'Skipped',
+  };
+}
+
+function isInvalidArchivedCandidate(candidate) {
+  return candidate?.fit_grade === 'INVALID' || String(candidate?.notes || '').startsWith('Auto-archived:');
+}
+
+function displayCandidateName(candidateLike) {
+  const name = String(candidateLike?.name || candidateLike?.full_name || '').trim();
+  if (!name || ['linkedin member', 'null', 'unknown'].includes(name.toLowerCase())) {
+    return 'unknown name';
+  }
+  return name;
+}
+
 function normaliseCandidate(profile, job, scoring, source = 'LinkedIn Search') {
   const linkedinUrl = profile.profile_url || profile.linkedin_url || (profile.public_identifier ? `https://www.linkedin.com/in/${profile.public_identifier}` : null);
   const yearsExperience = Array.isArray(profile.work_experience)
@@ -156,6 +197,29 @@ function stageRank(stage) {
 
 function mergeCandidateWithExisting(existing, incoming) {
   if (!existing) return incoming;
+  if (isInvalidArchivedCandidate(existing)) {
+    return applyInvalidCandidateState({
+      ...existing,
+      ...incoming,
+      fit_score: existing.fit_score ?? incoming.fit_score ?? 0,
+      fit_rationale: existing.fit_rationale || incoming.fit_rationale || 'Candidate was auto-archived as invalid',
+      latest_fit_score: existing.latest_fit_score ?? incoming.latest_fit_score ?? incoming.fit_score ?? existing.fit_score ?? 0,
+      latest_fit_grade: 'INVALID',
+      latest_fit_rationale: incoming.latest_fit_rationale || existing.latest_fit_rationale || `Auto-archived: ${String(existing.notes || '').replace(/^Auto-archived:\s*/, '') || 'invalid_candidate'}`,
+    }, String(existing.notes || '').replace(/^Auto-archived:\s*/, '') || 'invalid_candidate');
+  }
+  if (isInvalidArchivedCandidate(incoming)) {
+    const invalidReason = String(incoming.notes || '').replace(/^Auto-archived:\s*/, '') || 'invalid_candidate';
+    return applyInvalidCandidateState({
+      ...existing,
+      ...incoming,
+      fit_score: incoming.fit_score ?? existing.fit_score ?? 0,
+      fit_rationale: incoming.fit_rationale || existing.fit_rationale || `Auto-archived: ${invalidReason}`,
+      latest_fit_score: incoming.latest_fit_score ?? incoming.fit_score ?? existing.latest_fit_score ?? existing.fit_score ?? 0,
+      latest_fit_grade: 'INVALID',
+      latest_fit_rationale: incoming.latest_fit_rationale || incoming.fit_rationale || `Auto-archived: ${invalidReason}`,
+    }, invalidReason);
+  }
 
   const existingScore = Number(existing.fit_score || 0);
   const incomingScore = Number(incoming.fit_score || 0);
@@ -505,6 +569,25 @@ async function getActiveDuplicateProviderIds(jobId, providerIds = []) {
   return new Set((duplicates || []).map((candidate) => candidate.linkedin_provider_id).filter(Boolean));
 }
 
+async function saveCandidate(job, hasScoreHistory, candidatePayload) {
+  const { data: existing } = await supabase
+    .from('candidates')
+    .select('*')
+    .eq('job_id', job.id)
+    .eq('linkedin_provider_id', candidatePayload.linkedin_provider_id)
+    .maybeSingle();
+
+  const upsertPayload = hasScoreHistory
+    ? mergeCandidateWithExisting(existing, candidatePayload)
+    : stripScoreHistoryFields(mergeCandidateWithExisting(existing, candidatePayload));
+
+  const { data } = await supabase.from('candidates').upsert(upsertPayload, {
+    onConflict: 'job_id,linkedin_provider_id',
+  }).select('*').single();
+
+  return data || null;
+}
+
 export async function sourceCandidatesForJob(jobOrId) {
   const job = await getJob(jobOrId);
   if (!job) return { total: 0, hot: 0, warm: 0 };
@@ -553,14 +636,14 @@ export async function sourceCandidatesForJob(jobOrId) {
     const mergedProfile = profile ? { ...result, ...profile } : { ...result };
     if (!profile) {
       // eslint-disable-next-line no-await-in-loop
-      await logActivity(job.id, null, 'PROFILE_FALLBACK_USED', `Using search result only for ${result.name || result.full_name || result.id}`, {
+      await logActivity(job.id, null, 'PROFILE_FALLBACK_USED', `Using search result only for ${displayCandidateName(result)}`, {
         provider_id: result.provider_id || result.id || null,
       });
     }
     const relevance = evaluateCandidateRelevance(mergedProfile, job);
     if (!relevance.accepted) {
       // eslint-disable-next-line no-await-in-loop
-      await logActivity(job.id, null, 'SEARCH_RESULT_REJECTED', `${mergedProfile.name || result.name || 'Candidate'} rejected before save: ${relevance.reason}`, {
+      await logActivity(job.id, null, 'SEARCH_RESULT_REJECTED', `${displayCandidateName(mergedProfile) || displayCandidateName(result)} rejected before save: ${relevance.reason}`, {
         provider_id: mergedProfile.provider_id || result.provider_id || result.id || null,
         current_title: mergedProfile.current_title || mergedProfile.headline || null,
         current_company: mergedProfile.current_company || null,
@@ -570,32 +653,40 @@ export async function sourceCandidatesForJob(jobOrId) {
       await sleep(300);
       continue;
     }
-    // eslint-disable-next-line no-await-in-loop
-    const scoring = await scoreCandidateAgainstJob(mergedProfile, job);
-
-    const candidate = normaliseCandidate(mergedProfile, job, scoring);
-    // eslint-disable-next-line no-await-in-loop
-    const { data: existing } = await supabase
-      .from('candidates')
-      .select('*')
-      .eq('job_id', job.id)
-      .eq('linkedin_provider_id', candidate.linkedin_provider_id)
-      .maybeSingle();
-    const candidatePayload = hasScoreHistory
-      ? mergeCandidateWithExisting(existing, candidate)
-      : stripScoreHistoryFields(mergeCandidateWithExisting(existing, candidate));
-    // eslint-disable-next-line no-await-in-loop
-    const { data } = await supabase.from('candidates').upsert(candidatePayload, {
-      onConflict: 'job_id,linkedin_provider_id',
-    }).select('*').single();
+    const preValidatedCandidate = normaliseCandidate(mergedProfile, job, {
+      fit_score: 0,
+      fit_grade: 'ARCHIVE',
+      fit_rationale: 'Pending validation before scoring',
+    });
+    const validation = isValidCandidate(preValidatedCandidate);
+    let data;
+    if (!validation.valid) {
+      // eslint-disable-next-line no-await-in-loop
+      data = await saveCandidate(job, hasScoreHistory, applyInvalidCandidateState({
+        ...preValidatedCandidate,
+        fit_rationale: `Auto-archived: ${validation.reason}`,
+        latest_fit_rationale: `Auto-archived: ${validation.reason}`,
+      }, validation.reason));
+    } else {
+      // eslint-disable-next-line no-await-in-loop
+      const scoring = await scoreCandidateAgainstJob(mergedProfile, job);
+      const candidate = normaliseCandidate(mergedProfile, job, scoring);
+      // eslint-disable-next-line no-await-in-loop
+      data = await saveCandidate(job, hasScoreHistory, candidate);
+    }
     if (data) {
       savedCandidates.push(data);
+      const archiveReason = data.fit_grade === 'INVALID'
+        ? String(data.notes || '').replace(/^Auto-archived:\s*/, '') || 'invalid_candidate'
+        : null;
       // eslint-disable-next-line no-await-in-loop
       await logActivity(
         job.id,
         data.id,
         'CANDIDATE_SOURCED',
-        latestDiffersFromBest(data)
+        data.fit_grade === 'INVALID'
+          ? `${displayCandidateName(data)} auto-archived at ingestion (${archiveReason})`
+          : latestDiffersFromBest(data)
           ? `${data.name} re-sourced at ${data.latest_fit_score || 0}/100; best remains ${data.fit_score || 0}/100 (${data.pipeline_stage})`
           : `${data.name} sourced with score ${data.fit_score || 0}/100 and stage ${data.pipeline_stage}`,
         {
@@ -613,7 +704,9 @@ export async function sourceCandidatesForJob(jobOrId) {
         job.id,
         data.id,
         'CANDIDATE_SCORED',
-        latestDiffersFromBest(data)
+        data.fit_grade === 'INVALID'
+          ? `${displayCandidateName(data)} skipped scoring and was auto-archived (${archiveReason})`
+          : latestDiffersFromBest(data)
           ? `${data.name} re-scored ${data.latest_fit_score || 0}/100; best remains ${data.fit_score || 0}/100`
           : `${data.name} scored ${data.fit_score || 0}/100`,
         {
@@ -628,10 +721,14 @@ export async function sourceCandidatesForJob(jobOrId) {
       );
       if (data.pipeline_stage === 'Archived') {
         // eslint-disable-next-line no-await-in-loop
-        await logActivity(job.id, data.id, 'CANDIDATE_ARCHIVED', `${data.name} archived after scoring`, {
+        await logActivity(job.id, data.id, 'CANDIDATE_ARCHIVED', data.fit_grade === 'INVALID'
+          ? `${displayCandidateName(data)} auto-archived at ingestion`
+          : `${data.name} archived after scoring`, {
           fit_score: data.fit_score,
           fit_grade: data.fit_grade,
           rationale: data.fit_rationale,
+          linkedin_url: data.linkedin_url || null,
+          reason: archiveReason,
         });
       }
     }
@@ -672,6 +769,7 @@ export async function scoreUnscoredCandidates(jobOrId) {
     .from('candidates')
     .select('*')
     .eq('job_id', job.id)
+    .neq('fit_grade', 'INVALID')
     .not('pipeline_stage', 'eq', 'Archived')
     .limit(20);
 
@@ -757,41 +855,44 @@ export async function sourceFromLinkedInJobPosting(jobOrId) {
   for (const applicant of applicants || []) {
     if (blockedProviderIds.has(applicant.provider_id || applicant.id)) {
       // eslint-disable-next-line no-await-in-loop
-      await logActivity(job.id, null, 'ACTIVE_PIPELINE_DEDUPE', `Skipped applicant ${applicant.name || applicant.full_name || 'Unknown'} already attached to another active job`, {
+      await logActivity(job.id, null, 'ACTIVE_PIPELINE_DEDUPE', `Skipped applicant ${displayCandidateName(applicant)} already attached to another active job`, {
         provider_id: applicant.provider_id || applicant.id || null,
       });
       continue;
     }
 
-    // eslint-disable-next-line no-await-in-loop
-    const scoring = await scoreCandidateAgainstJob(applicant, job);
+    const preValidatedCandidate = normaliseCandidate(applicant, job, {
+      fit_score: 0,
+      fit_grade: 'ARCHIVE',
+      fit_rationale: 'Pending validation before scoring',
+    }, 'Job Posting Applicant');
+    const validation = isValidCandidate(preValidatedCandidate);
+    let candidate;
     let cvText = null;
+    if (!validation.valid) {
+      candidate = applyInvalidCandidateState({
+        ...preValidatedCandidate,
+        fit_rationale: `Auto-archived: ${validation.reason}`,
+        latest_fit_rationale: `Auto-archived: ${validation.reason}`,
+      }, validation.reason);
+    } else {
+      // eslint-disable-next-line no-await-in-loop
+      const scoring = await scoreCandidateAgainstJob(applicant, job);
 
-    if (['HOT', 'WARM'].includes(scoring.fit_grade) && applicant.applicant_id) {
-      // eslint-disable-next-line no-await-in-loop
-      const resume = await downloadApplicantResume(applicant.applicant_id);
-      // eslint-disable-next-line no-await-in-loop
-      cvText = await extractResumeText(resume);
+      if (['HOT', 'WARM'].includes(scoring.fit_grade) && applicant.applicant_id) {
+        // eslint-disable-next-line no-await-in-loop
+        const resume = await downloadApplicantResume(applicant.applicant_id);
+        // eslint-disable-next-line no-await-in-loop
+        cvText = await extractResumeText(resume);
+      }
+
+      candidate = normaliseCandidate(applicant, job, scoring, 'Job Posting Applicant');
+      candidate.cv_text = cvText;
+      candidate.pipeline_stage = scoring.fit_score >= 60 ? 'Shortlisted' : 'Sourced';
     }
 
-    const candidate = normaliseCandidate(applicant, job, scoring, 'Job Posting Applicant');
-    candidate.cv_text = cvText;
-    candidate.pipeline_stage = scoring.fit_score >= 60 ? 'Shortlisted' : 'Sourced';
     // eslint-disable-next-line no-await-in-loop
-    const { data: existing } = await supabase
-      .from('candidates')
-      .select('*')
-      .eq('job_id', job.id)
-      .eq('linkedin_provider_id', candidate.linkedin_provider_id)
-      .maybeSingle();
-    const candidatePayload = hasScoreHistory
-      ? mergeCandidateWithExisting(existing, candidate)
-      : stripScoreHistoryFields(mergeCandidateWithExisting(existing, candidate));
-
-    // eslint-disable-next-line no-await-in-loop
-    const { data } = await supabase.from('candidates').upsert(candidatePayload, {
-      onConflict: 'job_id,linkedin_provider_id',
-    }).select('*').single();
+    const data = await saveCandidate(job, hasScoreHistory, candidate);
     if (data) saved.push(data);
   }
 
