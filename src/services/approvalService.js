@@ -15,6 +15,18 @@ import { ensureSignedMessage } from './outreachTemplates.js';
 import { isConversationEnded, markConversationEnded } from './conversationState.js';
 
 const UNSENT_APPROVAL_STATUSES = ['pending', 'edited', 'approved'];
+const DUPLICATE_APPROVAL_WINDOW_MS = 5 * 60 * 1000;
+
+const APPROVAL_CHANNEL_LABELS = {
+  linkedin_dm: 'LinkedIn DM',
+  linkedin_follow_up: 'LinkedIn Follow-up',
+  connection_request: 'Connection Request',
+  email: 'Email',
+  email_initial: 'Email',
+  email_follow_up: 'Follow-up Email',
+  email_reply: 'Email Reply',
+  applicant_reply_email: 'Applicant Reply Email',
+};
 
 function getPendingApprovalPipelineStage(channel) {
   if (['linkedin_dm', 'email'].includes(channel)) return 'pending_approval';
@@ -71,19 +83,40 @@ export function validateDraftMessage(content, candidate) {
   return true;
 }
 
-function approvalMessage(candidate, job, approval) {
+function getApprovalChannelLabel(messageType, channel) {
+  return APPROVAL_CHANNEL_LABELS[messageType] || APPROVAL_CHANNEL_LABELS[channel] || messageType || channel || 'Message';
+}
+
+function approvalMessage(candidate, job, approval, contextLabel = null) {
   const normalizedJob = normalizeJobRecord(job);
   const normalizedApproval = normalizeApprovalRecord(approval);
+  const channelLabel = getApprovalChannelLabel(normalizedApproval.message_type, normalizedApproval.channel);
+  const subjectA = normalizedApproval.subject_a;
+  const subjectB = normalizedApproval.subject_b && normalizedApproval.subject_b !== normalizedApproval.subject_a
+    ? normalizedApproval.subject_b
+    : null;
+  const subjectLines = subjectA
+    ? [
+      `Subject A: ${subjectA}`,
+      `Subject B: ${subjectB || subjectA}`,
+      normalizedApproval.approved_subject ? `Approved Subject: ${normalizedApproval.approved_subject}` : null,
+    ].filter(Boolean)
+    : [];
+
   return [
-    `👤 *${candidate.name || 'Unknown'}* - ${candidate.current_title || 'Unknown title'} at ${candidate.current_company || 'Unknown company'}`,
+    `🎯 *RAXION - ${channelLabel} Draft Ready*`,
+    '',
+    `👤 *To:* ${candidate.name || 'Unknown'} (${candidate.current_company || candidate.current_title || 'unknown'})`,
     `💼 *JOB:* ${normalizedJob.job_title || normalizedJob.name} at ${normalizedJob.client_name || 'Unknown client'}`,
-    `📊 Fit Score: ${candidate.fit_score || 0} - ${candidate.fit_grade || 'UNKNOWN'}`,
-    `📍 Stage: ${normalizedApproval.channel} -> ${normalizedApproval.stage}`,
-    `🎯 ${candidate.linkedin_url || 'No LinkedIn URL'}`,
+    `📊 Fit Score: ${candidate.fit_score || '--'} - ${candidate.fit_grade || '--'}`,
+    `📍 Stage: ${candidate.pipeline_stage || normalizedApproval.stage || 'unknown'}`,
+    `🔗 ${candidate.linkedin_url || 'No LinkedIn URL'}`,
+    ...(contextLabel ? ['', `📌 *Context:* ${contextLabel}`] : []),
+    ...(subjectLines.length ? ['', ...subjectLines] : []),
     '',
     '--- MESSAGE ---',
     normalizedApproval.message_text || '',
-    '---------------',
+    '--- END ---',
     '',
     normalizedApproval.status === 'sent'
       ? '✅ Sent via Unipile'
@@ -95,20 +128,46 @@ function approvalMessage(candidate, job, approval) {
   ].join('\n');
 }
 
-function approvalReplyMarkup(approvalId, status, candidateId = null) {
-  if (!['pending', 'edited'].includes(status)) {
+function approvalReplyMarkup(approval, candidateId = null) {
+  const normalizedApproval = normalizeApprovalRecord(approval);
+  if (!['pending', 'edited'].includes(normalizedApproval.status)) {
     return { inline_keyboard: [] };
   }
 
-  return {
-    inline_keyboard: [[
-      { text: 'Approve', callback_data: `approval:approve:${approvalId}` },
-      { text: 'Edit', callback_data: `approval:edit:${approvalId}` },
-      { text: 'Skip', callback_data: `approval:skip:${approvalId}` },
-    ], ...(candidateId ? [[
+  return buildApprovalKeyboard(normalizedApproval, candidateId);
+}
+
+function buildApprovalKeyboard(approvalItem, candidateId = null) {
+  const normalizedApproval = normalizeApprovalRecord(approvalItem);
+  const buttons = [];
+
+  if (
+    normalizedApproval.subject_a
+    && normalizedApproval.subject_b
+    && normalizedApproval.subject_a !== normalizedApproval.subject_b
+  ) {
+    buttons.push([
+      { text: '✅ Approve A', callback_data: `approve_a_${normalizedApproval.id}` },
+      { text: '✅ Approve B', callback_data: `approve_b_${normalizedApproval.id}` },
+    ]);
+  } else {
+    buttons.push([
+      { text: '✅ Approve', callback_data: `approve_a_${normalizedApproval.id}` },
+    ]);
+  }
+
+  buttons.push([
+    { text: '✏️ Edit', callback_data: `edit_${normalizedApproval.id}` },
+    { text: '⏭ Skip', callback_data: `skip_${normalizedApproval.id}` },
+  ]);
+
+  if (candidateId) {
+    buttons.push([
       { text: 'End Chat', callback_data: `candidate:endchat:${candidateId}` },
-    ]] : [])],
-  };
+    ]);
+  }
+
+  return { inline_keyboard: buttons };
 }
 
 async function syncApprovalTelegramCard(approval) {
@@ -122,25 +181,45 @@ async function syncApprovalTelegramCard(approval) {
     getRecruiterChatId(),
     normalizedApproval.telegram_message_id,
     approvalMessage(candidate, job, normalizedApproval),
-    { reply_markup: approvalReplyMarkup(normalizedApproval.id, normalizedApproval.status, candidate.id) },
+    { reply_markup: approvalReplyMarkup(normalizedApproval, candidate.id) },
   ).catch(() => null);
 }
 
-async function deliverApprovalTelegramCard(approval, candidate, job) {
+export async function sendTelegramApprovalMessage(approval, candidate, job, contextLabel = null) {
   const normalizedApproval = normalizeApprovalRecord(approval);
-  const telegramResponse = await sendTelegramMessage(
-    getRecruiterChatId(),
-    approvalMessage(candidate, job, normalizedApproval),
-    { reply_markup: approvalReplyMarkup(normalizedApproval.id, normalizedApproval.status, candidate.id) },
-  );
-
-  if (telegramResponse?.result?.message_id) {
-    await supabase.from('approval_queue').update(await prepareApprovalUpdatePayload({
-      telegram_message_id: String(telegramResponse.result.message_id),
-    })).eq('id', normalizedApproval.id);
+  const recruiterChatId = getRecruiterChatId();
+  if (!recruiterChatId) {
+    console.error('[TELEGRAM] Missing recruiter chat id - cannot send approval');
+    return null;
   }
 
+  const replyMarkup = buildApprovalKeyboard(normalizedApproval, candidate.id);
+  const message = approvalMessage(candidate, job, normalizedApproval, contextLabel);
+  let telegramResponse = null;
+
+  try {
+    telegramResponse = await sendTelegramMessage(recruiterChatId, message, { reply_markup: replyMarkup });
+  } catch (error) {
+    console.warn(`[TELEGRAM] sendMessage failed for approval ${normalizedApproval.id}: ${error.message} - retrying without Markdown`);
+    telegramResponse = await sendTelegramMessage(recruiterChatId, message.replace(/[*_`]/g, ''), {
+      parse_mode: undefined,
+      reply_markup: replyMarkup,
+    }).catch(() => null);
+  }
+
+  if (!telegramResponse?.result?.message_id) {
+    return null;
+  }
+
+  await supabase.from('approval_queue').update(await prepareApprovalUpdatePayload({
+    telegram_message_id: String(telegramResponse.result.message_id),
+  })).eq('id', normalizedApproval.id);
+
   return telegramResponse;
+}
+
+async function deliverApprovalTelegramCard(approval, candidate, job, contextLabel = null) {
+  return sendTelegramApprovalMessage(approval, candidate, job, contextLabel);
 }
 
 async function getApprovalContext(approval) {
@@ -190,7 +269,10 @@ async function executeSend(approval, candidate) {
     return sendEmail(
       candidate.email,
       candidate.name,
-      normalizedApproval.subject || `${candidate.current_title || 'Opportunity'} at ${candidate.current_company || 'Raxion'}`,
+      normalizedApproval.approved_subject
+        || normalizedApproval.subject
+        || normalizedApproval.subject_a
+        || `${candidate.current_title || 'Opportunity'} at ${candidate.current_company || 'Raxion'}`,
       normalizedApproval.message_text,
     );
   }
@@ -258,7 +340,19 @@ async function incrementDailyLimit(approval) {
   }
 }
 
-export async function queueApproval({ candidateId, jobId, messageText, channel, stage, subject, messageType }) {
+export async function queueApproval({
+  candidateId,
+  jobId,
+  messageText,
+  channel,
+  stage,
+  subject,
+  messageType,
+  subjectA,
+  subjectB,
+  contextLabel = null,
+  allowMultiple = false,
+}) {
   if (channel === 'connection_request') {
     await logActivity(jobId, candidateId, 'MESSAGE_SKIPPED', 'Connection requests are sent autonomously and never queued for approval', {
       channel,
@@ -296,15 +390,15 @@ export async function queueApproval({ candidateId, jobId, messageText, channel, 
     return null;
   }
 
-  const existing = await findExistingApproval(candidateId, channel, stage);
+  const existing = allowMultiple ? null : await findExistingApproval(candidateId, channel, stage);
   if (existing) {
     if (existing.status !== 'approved' && existing.message_text !== finalMessageText) {
-      const { data: updated } = await supabase.from('approval_queue').update({
+      const { data: updated } = await supabase.from('approval_queue').update(await prepareApprovalUpdatePayload({
         message_text: finalMessageText,
-      }).eq('id', existing.id).select('*').single();
+      })).eq('id', existing.id).select('*').single();
 
       if (updated?.telegram_message_id) {
-        await editTelegramMessage(getRecruiterChatId(), updated.telegram_message_id, approvalMessage(candidate, normalizedJob, updated)).catch(() => null);
+        await syncApprovalTelegramCard(updated);
       }
 
       await logActivity(jobId, candidateId, 'MESSAGE_DRAFT_UPDATED', `Updated queued ${channel} draft`, {
@@ -329,6 +423,8 @@ export async function queueApproval({ candidateId, jobId, messageText, channel, 
     channel,
     stage,
     subject,
+    subject_a: subjectA,
+    subject_b: subjectB,
     message_type: messageType || channel,
   })).select('*').single();
   if (error || !approval) return null;
@@ -342,7 +438,7 @@ export async function queueApproval({ candidateId, jobId, messageText, channel, 
   }
 
   try {
-    await deliverApprovalTelegramCard(normalizedApproval, candidate, normalizedJob);
+    await deliverApprovalTelegramCard(normalizedApproval, candidate, normalizedJob, contextLabel);
   } catch (error) {
     await logActivity(jobId, candidateId, 'TELEGRAM_APPROVAL_NOTIFY_FAILED', `Telegram approval notification failed: ${error.message}`, {
       approval_id: normalizedApproval.id,
@@ -357,6 +453,20 @@ export async function queueApproval({ candidateId, jobId, messageText, channel, 
     stage,
   });
   return normalizedApproval;
+}
+
+export async function isDuplicateApproval(candidateId, messageType, windowMs = DUPLICATE_APPROVAL_WINDOW_MS) {
+  const since = new Date(Date.now() - windowMs).toISOString();
+  const { data: recent } = await supabase
+    .from('approval_queue')
+    .select('id')
+    .eq('candidate_id', candidateId)
+    .eq('message_type', messageType)
+    .in('status', UNSENT_APPROVAL_STATUSES)
+    .gte('created_at', since)
+    .limit(1);
+
+  return Boolean(recent?.length);
 }
 
 export async function resendMissingTelegramApprovalCards(limit = 25) {
@@ -393,7 +503,7 @@ export async function resendMissingTelegramApprovalCards(limit = 25) {
   return resent;
 }
 
-export async function approveQueuedMessage(approvalId) {
+export async function approveQueuedMessage(approvalId, subjectVariant = 'A') {
   const { data: rawApproval } = await supabase.from('approval_queue').select('*').eq('id', approvalId).single();
   const approval = normalizeApprovalRecord(rawApproval);
   if (!approval || !['pending', 'edited'].includes(approval.status)) return null;
@@ -411,9 +521,14 @@ export async function approveQueuedMessage(approvalId) {
     return null;
   }
 
+  const approvedSubject = subjectVariant === 'B' && approval.subject_b
+    ? approval.subject_b
+    : approval.subject_a || approval.subject || null;
+
   const { data: updated } = await supabase.from('approval_queue').update(await prepareApprovalUpdatePayload({
     status: 'approved',
     approved_at: new Date().toISOString(),
+    approved_subject: approvedSubject,
   })).eq('id', approvalId).select('*').single();
 
   const approvedPipelineStage = getApprovedPipelineStage(approval.channel, approval.stage);
@@ -426,6 +541,7 @@ export async function approveQueuedMessage(approvalId) {
   await logActivity(approval.job_id, approval.candidate_id, 'MESSAGE_APPROVED', `Recruiter approved ${approval.channel}`, {
     approval_id: approvalId,
     channel: approval.channel,
+    subject_variant: subjectVariant,
   });
   const normalizedUpdated = normalizeApprovalRecord(updated) || approval;
   await syncApprovalTelegramCard(normalizedUpdated);
@@ -568,7 +684,7 @@ export async function editQueuedMessage(approvalId, messageText) {
       getRecruiterChatId(),
       normalizedApproval.telegram_message_id,
       approvalMessage(candidate, job, normalizedApproval),
-      { reply_markup: approvalReplyMarkup(normalizedApproval.id, normalizedApproval.status, candidate.id) },
+      { reply_markup: approvalReplyMarkup(normalizedApproval, candidate.id) },
     ).catch(() => null);
   }
 

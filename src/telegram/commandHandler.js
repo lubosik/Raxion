@@ -108,23 +108,64 @@ export function startTelegramBot() {
 
   bot.on('callback_query', async (query) => {
     const chatId = String(query.message?.chat?.id || '');
+    const messageId = query.message?.message_id;
     if (chatId !== String(recruiterChatId)) {
       await bot.answerCallbackQuery(query.id).catch(() => null);
       return;
     }
 
     const payload = String(query.data || '');
-    const [scope, action, targetId] = payload.split(':');
-    if (!scope || !action || !targetId) {
-      await bot.answerCallbackQuery(query.id).catch(() => null);
-      return;
-    }
 
     try {
+      await bot.answerCallbackQuery(query.id).catch(() => null);
+
+      if (payload.startsWith('approve_a_') || payload.startsWith('approve_b_')) {
+        const approvalId = payload.replace('approve_a_', '').replace('approve_b_', '');
+        const subjectVariant = payload.startsWith('approve_b_') ? 'B' : 'A';
+        const result = await approveQueuedMessage(approvalId, subjectVariant);
+        if (messageId) {
+          await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+            chat_id: chatId,
+            message_id: messageId,
+          }).catch(() => null);
+        }
+        await bot.sendMessage(chatId, result?.status === 'sent'
+          ? `✅ Approved and sent with Subject ${subjectVariant}.`
+          : `✅ Approved and queued to send with Subject ${subjectVariant}.`).catch(() => null);
+        return;
+      }
+
+      if (payload.startsWith('edit_')) {
+        const approvalId = payload.replace('edit_', '');
+        const prompt = await bot.sendMessage(chatId, 'Reply to this message with the updated draft text for this approval.', {
+          reply_markup: { force_reply: true, selective: true },
+        });
+        pendingApprovalEdits.set(prompt.message_id, approvalId);
+        return;
+      }
+
+      if (payload.startsWith('skip_')) {
+        const approvalId = payload.replace('skip_', '');
+        const result = await skipQueuedMessage(approvalId);
+        if (messageId) {
+          await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+            chat_id: chatId,
+            message_id: messageId,
+          }).catch(() => null);
+        }
+        await bot.sendMessage(chatId, result ? '⏭ Skipped.' : 'Already handled.').catch(() => null);
+        return;
+      }
+
+      const [scope, action, targetId] = payload.split(':');
+      if (!scope || !action || !targetId) {
+        return;
+      }
+
       if (scope === 'candidate' && action === 'endchat') {
         const { data: candidate } = await supabase.from('candidates').select('*').eq('id', targetId).single();
         if (!candidate) {
-          await bot.answerCallbackQuery(query.id, { text: 'Candidate not found.' }).catch(() => null);
+          await bot.sendMessage(chatId, 'Candidate not found.').catch(() => null);
           return;
         }
         const { data: updated } = await supabase
@@ -137,28 +178,35 @@ export function startTelegramBot() {
         await logActivity(updated.job_id, updated.id, 'CHAT_ENDED', `${updated.name} conversation ended from Telegram`, {
           source: 'telegram',
         });
-        await bot.answerCallbackQuery(query.id, { text: 'Chat ended and archived.' }).catch(() => null);
+        await bot.sendMessage(chatId, 'Chat ended and archived.').catch(() => null);
         return;
       }
 
       if (scope !== 'approval') {
-        await bot.answerCallbackQuery(query.id).catch(() => null);
         return;
       }
 
       if (action === 'approve') {
         const result = await approveQueuedMessage(targetId);
-        await bot.answerCallbackQuery(query.id, {
-          text: result?.status === 'sent' ? 'Approved and sent.' : 'Approved.',
-        }).catch(() => null);
+        if (messageId) {
+          await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+            chat_id: chatId,
+            message_id: messageId,
+          }).catch(() => null);
+        }
+        await bot.sendMessage(chatId, result?.status === 'sent' ? '✅ Approved and sent.' : '✅ Approved.').catch(() => null);
         return;
       }
 
       if (action === 'skip') {
         const result = await skipQueuedMessage(targetId);
-        await bot.answerCallbackQuery(query.id, {
-          text: result ? 'Skipped.' : 'Already handled.',
-        }).catch(() => null);
+        if (messageId) {
+          await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+            chat_id: chatId,
+            message_id: messageId,
+          }).catch(() => null);
+        }
+        await bot.sendMessage(chatId, result ? '⏭ Skipped.' : 'Already handled.').catch(() => null);
         return;
       }
 
@@ -167,10 +215,8 @@ export function startTelegramBot() {
           reply_markup: { force_reply: true, selective: true },
         });
         pendingApprovalEdits.set(prompt.message_id, targetId);
-        await bot.answerCallbackQuery(query.id, { text: 'Send your edited draft as a reply.' }).catch(() => null);
       }
     } catch (error) {
-      await bot.answerCallbackQuery(query.id, { text: 'Action failed.' }).catch(() => null);
       await bot.sendMessage(chatId, '⚠️ Telegram approval action failed.').catch(() => null);
     }
   });

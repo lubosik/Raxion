@@ -136,7 +136,10 @@ export function normalizeApprovalRecord(approval) {
     message_text: approval.message_text || approval.body || approval.edited_body || '',
     stage: approval.stage || approval.message_type || null,
     telegram_message_id: approval.telegram_message_id || (approval.telegram_msg_id != null ? String(approval.telegram_msg_id) : null),
-    subject: approval.subject || null,
+    subject: approval.approved_subject || approval.subject_a || approval.subject || null,
+    subject_a: approval.subject_a || approval.subject || null,
+    subject_b: approval.subject_b || approval.subject || null,
+    approved_subject: approval.approved_subject || null,
   };
 }
 
@@ -151,6 +154,9 @@ export async function prepareApprovalInsertPayload(input) {
     'message_type',
     'status',
     'subject',
+    'subject_a',
+    'subject_b',
+    'approved_subject',
     'telegram_message_id',
   ]);
 
@@ -164,6 +170,9 @@ export async function prepareApprovalInsertPayload(input) {
   if (columns.message_type) payload.message_type = input.message_type || input.channel;
   if (columns.status) payload.status = input.status || 'pending';
   if (columns.subject && input.subject !== undefined) payload.subject = input.subject;
+  if (columns.subject_a && input.subject_a !== undefined) payload.subject_a = input.subject_a;
+  if (columns.subject_b && input.subject_b !== undefined) payload.subject_b = input.subject_b;
+  if (columns.approved_subject && input.approved_subject !== undefined) payload.approved_subject = input.approved_subject;
   return payload;
 }
 
@@ -171,9 +180,11 @@ export async function prepareApprovalUpdatePayload(input) {
   const columns = await supportedColumns('approval_queue', [
     'message_text',
     'body',
+    'edited_body',
     'status',
     'telegram_message_id',
     'approved_at',
+    'approved_subject',
     'sent_at',
   ]);
 
@@ -181,10 +192,12 @@ export async function prepareApprovalUpdatePayload(input) {
   if (input.message_text !== undefined) {
     if (columns.message_text) payload.message_text = input.message_text;
     if (columns.body) payload.body = input.message_text;
+    if (columns.edited_body) payload.edited_body = input.message_text;
   }
   if (input.status !== undefined && columns.status) payload.status = input.status;
   if (input.telegram_message_id !== undefined && columns.telegram_message_id) payload.telegram_message_id = input.telegram_message_id;
   if (input.approved_at !== undefined && columns.approved_at) payload.approved_at = input.approved_at;
+  if (input.approved_subject !== undefined && columns.approved_subject) payload.approved_subject = input.approved_subject;
   if (input.sent_at !== undefined && columns.sent_at) payload.sent_at = input.sent_at;
   return payload;
 }

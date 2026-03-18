@@ -27,6 +27,9 @@ async function sendTelegramRequest(method, payload) {
   let result = await send(payload);
   if (!result.ok && payload.parse_mode && result.status === 400) {
     const fallbackPayload = { ...payload };
+    if (typeof fallbackPayload.text === 'string') {
+      fallbackPayload.text = fallbackPayload.text.replace(/[*_`]/g, '');
+    }
     delete fallbackPayload.parse_mode;
     result = await send(fallbackPayload);
   }
@@ -60,6 +63,14 @@ export async function editTelegramMessage(chatId, messageId, message, options = 
     disable_web_page_preview: true,
     parse_mode: 'Markdown',
     ...options,
+  });
+}
+
+export async function editTelegramReplyMarkup(chatId, messageId, replyMarkup) {
+  return sendTelegramRequest('editMessageReplyMarkup', {
+    chat_id: chatId,
+    message_id: Number(messageId),
+    reply_markup: replyMarkup,
   });
 }
 

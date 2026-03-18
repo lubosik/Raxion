@@ -3,9 +3,9 @@ import { callClaude, extractDocumentData } from '../integrations/claude.js';
 import { downloadAttachment, getChatMessages } from '../integrations/unipile.js';
 import { sendTelegramMessage, getRecruiterChatId } from '../integrations/telegram.js';
 import { syncCandidateToATS } from '../integrations/zohoRecruit.js';
-import { queueApproval } from './approvalService.js';
+import { isDuplicateApproval, queueApproval } from './approvalService.js';
 import { logActivity } from './activityLogger.js';
-import { ensureSignedMessage, getSenderSignature, getAgentGuidanceBlock } from './outreachTemplates.js';
+import { ensureSignedMessage, getAgentGuidanceBlock, getSenderSignature } from './outreachTemplates.js';
 import { normalizeConversationRecord, normalizeJobRecord, prepareConversationInsertPayload } from './dbCompat.js';
 import {
   clearEndChatRecommendation,
@@ -13,50 +13,36 @@ import {
   markEndChatRecommended,
 } from './conversationState.js';
 
-async function classifyReply(candidate, job, conversationHistory, messageText) {
-  const qualificationBlock = job.qualified_criteria
-    ? `\n\nQUALIFICATION CRITERIA FOR THIS ROLE:\n${job.qualified_criteria}\n\nA candidate is QUALIFIED if they meet these criteria. A candidate is NOT QUALIFIED if they clearly fall short of any of these requirements.`
-    : '\n\nNo specific qualification criteria defined - use general fit score and role requirements to assess.';
-  return callClaude(
-    `You are classifying a candidate reply for the role: ${job.job_title} at ${job.client_name}.
-${qualificationBlock}
+const messageDebounceMap = new Map();
+const recentInboundMessageIds = new Map();
+const DEBOUNCE_MS = 90 * 1000;
+const RECENT_MESSAGE_TTL_MS = 10 * 60 * 1000;
 
-Recruiter identity: ${getSenderSignature(job)}
-Agent guidance: ${getAgentGuidanceBlock() || 'None'}
+function pruneRecentMessageIds() {
+  const now = Date.now();
+  for (const [messageId, expiresAt] of recentInboundMessageIds.entries()) {
+    if (expiresAt <= now) {
+      recentInboundMessageIds.delete(messageId);
+    }
+  }
+}
 
-Conversation so far:
-${JSON.stringify(conversationHistory)}
+function rememberRecentMessageId(messageId) {
+  if (!messageId) return;
+  pruneRecentMessageIds();
+  recentInboundMessageIds.set(messageId, Date.now() + RECENT_MESSAGE_TTL_MS);
+}
 
-Latest reply from candidate:
-${messageText}
-
-If you provide suggested_reply, write it in the recruiter's voice, keep it consistent with the conversation history, and end it with the exact recruiter signature.
-Also decide whether the conversation should be recommended for closure because the thread has reached a natural conclusion, been declined, been booked, or been deferred.
-
-Logic:
-- If qualified: true, next_action should usually be push_for_booking.
-- If qualified: false, next_action should usually be polite_decline.
-- If qualified: null because key information is missing, next_action should usually be ask_qualifying_question.
-- If they asked a direct question, use answer_question.
-- If they are not interested, use archive.
-
-Return ONLY valid JSON:
-{"intent":"interested|not_interested|asking_question|neutral|maybe_later|referral|booking_confirmed|other","sentiment":"positive|neutral|negative","key_points":"","concerns":"","qualified":true|false|null,"qualification_notes":"","next_action":"ask_qualifying_question|push_for_booking|polite_decline|answer_question|continue_conversation|archive","suggested_reply":"","qualifying_question_to_ask":"","should_end_conversation":true|false,"end_reason":""}.`,
-    'You are a recruiting conversation classifier. Follow the role-specific qualification criteria when present. Return valid JSON only.',
-    { expectJson: true },
-  ).catch(() => ({
-    intent: 'other',
-    sentiment: 'neutral',
-    key_points: 'Classification failed',
-    concerns: '',
-    qualified: null,
-    qualification_notes: '',
-    next_action: 'continue_conversation',
-    suggested_reply: '',
-    qualifying_question_to_ask: '',
-    should_end_conversation: false,
-    end_reason: '',
-  }));
+function hasRecentMessageId(messageId) {
+  if (!messageId) return false;
+  pruneRecentMessageIds();
+  const expiresAt = recentInboundMessageIds.get(messageId);
+  if (!expiresAt) return false;
+  if (expiresAt <= Date.now()) {
+    recentInboundMessageIds.delete(messageId);
+    return false;
+  }
+  return true;
 }
 
 async function extractCv(buffer) {
@@ -70,7 +56,11 @@ async function extractCv(buffer) {
 }
 
 async function getConversationHistory(candidateId) {
-  const { data } = await supabase.from('conversations').select('*').eq('candidate_id', candidateId).order('sent_at', { ascending: true });
+  const { data } = await supabase
+    .from('conversations')
+    .select('*')
+    .eq('candidate_id', candidateId)
+    .order('sent_at', { ascending: true });
   return (data || []).map(normalizeConversationRecord);
 }
 
@@ -103,31 +93,14 @@ function extractMessageId(payload) {
   return payload.message_id || payload.data?.message_id || payload.provider_message_id || payload.id || payload.provider_id || null;
 }
 
-export async function processIncomingMessage(webhookPayload) {
-  const chatId = webhookPayload.chat_id || webhookPayload.data?.chat_id || null;
-  const senderProviderIds = extractSenderProviderIds(webhookPayload);
-  const senderEmail = webhookPayload.from_attendee?.identifier || webhookPayload.sender_email || null;
-  const messageText = webhookPayload.text || webhookPayload.message_text || webhookPayload.data?.text || '';
-  const attachments = webhookPayload.attachments || webhookPayload.data?.attachments || [];
-  const timestamp = webhookPayload.timestamp || new Date().toISOString();
-  const messageId = extractMessageId(webhookPayload);
-  const channel = webhookPayload.channel || webhookPayload.source_channel || 'linkedin_dm';
+function getInboundChannel(payload) {
+  return payload.channel || payload.source_channel || 'linkedin_dm';
+}
 
-  if (!messageText.trim() && !attachments.length) {
-    return null;
-  }
-
-  if (messageId) {
-    const { data: existingConversation } = await supabase
-      .from('conversations')
-      .select('id')
-      .eq('unipile_message_id', messageId)
-      .limit(1)
-      .maybeSingle();
-    if (existingConversation) {
-      return null;
-    }
-  }
+async function findCandidateForPayload(payload) {
+  const chatId = payload.chat_id || payload.data?.chat_id || null;
+  const senderProviderIds = extractSenderProviderIds(payload);
+  const senderEmail = payload.from_attendee?.identifier || payload.sender_email || null;
 
   let candidateQuery = supabase
     .from('candidates')
@@ -147,88 +120,335 @@ export async function processIncomingMessage(webhookPayload) {
   }
 
   const { data: candidate } = await candidateQuery.maybeSingle();
+  return candidate || null;
+}
 
-  if (!candidate) {
-    console.warn('[replyHandler] unknown incoming message', { chatId, senderProviderIds, senderEmail, messageId });
-    return null;
+function scheduleBatchFlush(candidateId) {
+  return setTimeout(() => {
+    flushMessageBatch(candidateId).catch((error) => {
+      console.error('[REPLY] flushMessageBatch failed', { candidateId, error: error.message });
+    });
+  }, DEBOUNCE_MS);
+}
+
+function addMessageToBatch(candidate, payload) {
+  const candidateId = candidate.id;
+  const messageId = extractMessageId(payload);
+  const messageText = String(payload.text || payload.message_text || payload.data?.text || '').trim();
+  const attachments = payload.attachments || payload.data?.attachments || [];
+  const timestamp = payload.timestamp || new Date().toISOString();
+  const channel = getInboundChannel(payload);
+  const chatId = payload.chat_id || payload.data?.chat_id || candidate.unipile_chat_id || null;
+
+  const entry = {
+    content: messageText,
+    attachments,
+    received_at: timestamp,
+    channel,
+    chatId,
+    messageId,
+    raw: payload,
+  };
+
+  if (messageDebounceMap.has(candidateId)) {
+    const existing = messageDebounceMap.get(candidateId);
+    if (messageId && existing.messages.some((message) => message.messageId && message.messageId === messageId)) {
+      return existing;
+    }
+    clearTimeout(existing.timer);
+    existing.messages.push(entry);
+    existing.timer = scheduleBatchFlush(candidateId);
+    messageDebounceMap.set(candidateId, existing);
+    console.log(`[REPLY] Added message to batch for ${candidate.name} (${existing.messages.length} queued)`);
+    return existing;
   }
 
+  const batch = {
+    candidate,
+    messages: [entry],
+    timer: scheduleBatchFlush(candidateId),
+  };
+  messageDebounceMap.set(candidateId, batch);
+  console.log(`[REPLY] Started message batch for ${candidate.name}`);
+  return batch;
+}
+
+async function storeInboundMessages(candidate, jobId, messages) {
+  const messageIds = uniqueNonEmpty(messages.map((message) => message.messageId));
+  const existingIds = new Set();
+
+  if (messageIds.length) {
+    const { data: existing } = await supabase
+      .from('conversations')
+      .select('unipile_message_id')
+      .in('unipile_message_id', messageIds);
+    for (const row of existing || []) {
+      if (row.unipile_message_id) existingIds.add(String(row.unipile_message_id));
+    }
+  }
+
+  for (const message of messages) {
+    if (message.messageId && existingIds.has(String(message.messageId))) continue;
+    await supabase.from('conversations').insert(await prepareConversationInsertPayload({
+      candidate_id: candidate.id,
+      job_id: jobId,
+      direction: 'inbound',
+      channel: message.channel,
+      message_text: message.content,
+      unipile_message_id: message.messageId,
+      sent_at: message.received_at,
+      read: false,
+    }));
+  }
+}
+
+async function ingestCvFromMessages(candidate, messages) {
+  for (const message of messages) {
+    for (const attachment of message.attachments || []) {
+      const mime = attachment.mime_type || attachment.mimetype || '';
+      if (!/pdf|document|octet-stream/i.test(mime)) continue;
+      if (!message.messageId) continue;
+      const buffer = await downloadAttachment(message.messageId, attachment.id || attachment.attachment_id);
+      if (!buffer) continue;
+      const parsedCv = await extractCv(buffer);
+      if (!parsedCv) continue;
+
+      const nextCandidate = {
+        ...candidate,
+        name: parsedCv.name || candidate.name,
+        email: parsedCv.email || candidate.email,
+        phone: parsedCv.phone || candidate.phone,
+        current_title: parsedCv.current_title || candidate.current_title,
+        current_company: parsedCv.current_company || candidate.current_company,
+        years_experience: parsedCv.years_experience || candidate.years_experience,
+        tech_skills: parsedCv.tech_skills || candidate.tech_skills,
+        education: parsedCv.education || candidate.education,
+        past_employers: parsedCv.past_employers || candidate.past_employers,
+        cv_text: parsedCv.cv_text || null,
+        notes: `${candidate.notes || ''}\n[CV_RECEIVED]`.trim(),
+      };
+
+      await supabase.from('candidates').update({
+        name: nextCandidate.name,
+        email: nextCandidate.email,
+        phone: nextCandidate.phone,
+        current_title: nextCandidate.current_title,
+        current_company: nextCandidate.current_company,
+        years_experience: nextCandidate.years_experience,
+        tech_skills: nextCandidate.tech_skills,
+        education: nextCandidate.education,
+        past_employers: nextCandidate.past_employers,
+        cv_text: nextCandidate.cv_text,
+        notes: nextCandidate.notes,
+      }).eq('id', candidate.id);
+
+      await syncCandidateToATS(nextCandidate);
+      await logActivity(candidate.job_id, candidate.id, 'CV_RECEIVED', `${nextCandidate.name} CV received and parsed from inbound reply`, {
+        message_id: message.messageId,
+      });
+      await sendTelegramMessage(getRecruiterChatId(), `📎 ${candidate.name} sent their CV - extracted and synced to ATS`).catch(() => null);
+      return { parsedCv, cvText: parsedCv.cv_text || null, candidate: nextCandidate };
+    }
+  }
+
+  return { parsedCv: null, cvText: null, candidate };
+}
+
+function buildConversationContext(history, candidateName) {
+  return (history || [])
+    .map((message) => `${message.direction === 'inbound' ? candidateName : 'Raxion'}: ${message.message_text}`)
+    .join('\n');
+}
+
+function buildClassificationFallback() {
+  return {
+    intent: 'other',
+    sentiment: 'neutral',
+    key_points: 'Classification failed',
+    concerns: '',
+    qualified: null,
+    qualification_notes: '',
+    cv_ingested: false,
+    cv_assessment: null,
+    messages_to_send: [],
+    next_action: 'continue_conversation',
+    qualifying_question_to_ask: '',
+    should_end_conversation: false,
+    end_reason: '',
+  };
+}
+
+async function classifyReplyBatch(candidate, job, conversationHistory, combinedContent, messages, cvText) {
+  const qualificationBlock = job.qualified_criteria
+    ? `QUALIFICATION CRITERIA:\n${job.qualified_criteria}`
+    : 'QUALIFICATION CRITERIA:\nNone specified.';
+  const agentGuidance = getAgentGuidanceBlock() || 'None';
+  const cvContext = cvText ? `\n\nCV PROVIDED BY CANDIDATE:\n${cvText}` : '';
+  const prompt = `You are classifying a candidate reply for the role: ${job.job_title} at ${job.client_name}.
+
+${qualificationBlock}
+
+Recruiter identity: ${getSenderSignature(job)}
+Agent guidance:
+${agentGuidance}
+
+FULL CONVERSATION SO FAR:
+${buildConversationContext(conversationHistory, candidate.name)}
+
+LATEST MESSAGES FROM CANDIDATE (may be multiple sent in sequence):
+${combinedContent}${cvContext}
+
+The candidate sent ${messages.length} message(s). Treat them as one coherent turn.
+
+Return ONLY valid JSON:
+{"intent":"interested|not_interested|asking_question|neutral|maybe_later|referral|booking_confirmed|providing_info|other","sentiment":"positive|neutral|negative","key_points":"","concerns":"","qualified":true|false|null,"qualification_notes":"","cv_ingested":true|false,"cv_assessment":"","messages_to_send":[{"reply_to_context":"","body":""}],"next_action":"ask_qualifying_question|push_for_booking|polite_decline|answer_question|acknowledge_cv|continue_conversation|archive","qualifying_question_to_ask":"","should_end_conversation":true|false,"end_reason":""}
+
+Rules:
+- If candidate sends multiple messages, treat them as one conversation turn.
+- Answer multiple distinct questions in one reply where possible.
+- Only create multiple replies if they genuinely need separate responses.
+- If a CV was provided, acknowledge it and give brief feedback based on fit.
+- Keep each reply conversational, first name only, no em dashes, sign off with the exact recruiter signature.
+- Never repeat yourself across multiple replies in the same turn.`;
+
+  return callClaude(
+    prompt,
+    'You are a recruiting conversation classifier. Follow the role-specific qualification criteria and return valid JSON only.',
+    { expectJson: true, maxTokens: 1000 },
+  ).catch(() => buildClassificationFallback());
+}
+
+async function queueRepliesFromClassification(candidate, job, channel, classification, combinedContent) {
+  const outboundChannel = channel === 'email' ? 'email' : 'linkedin_dm';
+  const messageType = channel === 'email' ? 'email_reply' : 'linkedin_dm';
+  const repliesToSend = Array.isArray(classification.messages_to_send)
+    ? classification.messages_to_send.filter((message) => String(message?.body || '').trim())
+    : [];
+
+  if (!repliesToSend.length && classification.next_action === 'push_for_booking') {
+    repliesToSend.push({
+      reply_to_context: 'Booking follow-up',
+      body: job?.calendly_link
+        ? `Thanks for the reply. You can book a time here: ${job.calendly_link}`
+        : 'Thanks for the reply. Happy to share more and line up a call if useful.',
+    });
+  }
+
+  if (!repliesToSend.length && classification.next_action === 'ask_qualifying_question' && classification.qualifying_question_to_ask) {
+    repliesToSend.push({
+      reply_to_context: 'Qualification follow-up',
+      body: classification.qualifying_question_to_ask,
+    });
+  }
+
+  if (!repliesToSend.length) {
+    return 0;
+  }
+
+  if (await isDuplicateApproval(candidate.id, messageType)) {
+    await logActivity(job.id, candidate.id, 'DUPLICATE_SUPPRESSED', `[${job.job_title}]: Duplicate reply notification suppressed for ${candidate.name}`, {
+      channel: outboundChannel,
+      message_type: messageType,
+      combined_content: combinedContent,
+    });
+    return 0;
+  }
+
+  let queuedCount = 0;
+  for (let index = 0; index < repliesToSend.length; index += 1) {
+    const reply = repliesToSend[index];
+    const body = ensureSignedMessage(job, reply.body || '');
+    const contextLabel = repliesToSend.length > 1
+      ? `Reply ${index + 1}/${repliesToSend.length} - ${reply.reply_to_context || 'Follow-up'}`
+      : (reply.reply_to_context || null);
+    const stage = classification.next_action === 'archive' || classification.next_action === 'polite_decline'
+      ? 'Archived'
+      : 'in_conversation';
+
+    const queued = await queueApproval({
+      candidateId: candidate.id,
+      jobId: candidate.job_id,
+      channel: outboundChannel,
+      stage,
+      messageText: body,
+      messageType,
+      contextLabel,
+      allowMultiple: repliesToSend.length > 1,
+    });
+
+    if (!queued) continue;
+    queuedCount += 1;
+    await logActivity(job.id, candidate.id, 'REPLY_QUEUED', `[${job.job_title}]: Reply drafted for ${candidate.name}${contextLabel ? ` (${contextLabel})` : ''} - awaiting approval`, {
+      approval_id: queued.id,
+      channel: outboundChannel,
+      message_type: messageType,
+    });
+  }
+
+  return queuedCount;
+}
+
+async function processBatchedMessages(candidate, messages) {
   const { data: rawJob } = await supabase.from('jobs').select('*').eq('id', candidate.job_id).single();
   const job = normalizeJobRecord(rawJob);
-  const [conversationHistory, remoteConversationHistory] = await Promise.all([
-    getConversationHistory(candidate.id),
-    getRemoteConversationHistory(chatId || candidate.unipile_chat_id),
-  ]);
-  const fullConversationHistory = remoteConversationHistory.length ? remoteConversationHistory : conversationHistory;
+  if (!job) return null;
 
-  await supabase.from('conversations').insert(await prepareConversationInsertPayload({
-    candidate_id: candidate.id,
-    job_id: candidate.job_id,
-    direction: 'inbound',
-    channel,
-    message_text: messageText,
-    unipile_message_id: messageId,
-    sent_at: timestamp,
-    read: false,
-  }));
+  const combinedContent = messages
+    .map((message) => message.content)
+    .filter(Boolean)
+    .join('\n\n')
+    .trim();
+  const channel = messages[0]?.channel || 'linkedin_dm';
 
+  await storeInboundMessages(candidate, job.id, messages);
+
+  const nextPipelineStage = ['Interview Booked', 'Interview Scheduled', 'Offered', 'Placed'].includes(candidate.pipeline_stage)
+    ? candidate.pipeline_stage
+    : 'reply_received';
   await supabase.from('candidates').update({
     last_reply_at: new Date().toISOString(),
-    pipeline_stage: ['Interview Booked', 'Interview Scheduled', 'Offered', 'Placed'].includes(candidate.pipeline_stage) ? candidate.pipeline_stage : 'reply_received',
+    pipeline_stage: nextPipelineStage,
   }).eq('id', candidate.id);
 
-  for (const attachment of attachments) {
-    const mime = attachment.mime_type || attachment.mimetype || '';
-    if (!/pdf|document|octet-stream/i.test(mime)) continue;
-    // eslint-disable-next-line no-await-in-loop
-    const buffer = await downloadAttachment(messageId, attachment.id || attachment.attachment_id);
-    if (!buffer) continue;
-    // eslint-disable-next-line no-await-in-loop
-    const parsedCv = await extractCv(buffer);
-    if (!parsedCv) continue;
+  const cvResult = await ingestCvFromMessages(candidate, messages);
+  const currentCandidate = cvResult.candidate || candidate;
 
-    const nextNotes = `${candidate.notes || ''}\n[CV_RECEIVED]`.trim();
-    // eslint-disable-next-line no-await-in-loop
-    await supabase.from('candidates').update({
-      name: parsedCv.name || candidate.name,
-      email: parsedCv.email || candidate.email,
-      phone: parsedCv.phone || candidate.phone,
-      current_title: parsedCv.current_title || candidate.current_title,
-      current_company: parsedCv.current_company || candidate.current_company,
-      years_experience: parsedCv.years_experience || candidate.years_experience,
-      tech_skills: parsedCv.tech_skills || candidate.tech_skills,
-      education: parsedCv.education || candidate.education,
-      past_employers: parsedCv.past_employers || candidate.past_employers,
-      cv_text: parsedCv.cv_text || null,
-      notes: nextNotes,
-    }).eq('id', candidate.id);
-    // eslint-disable-next-line no-await-in-loop
-    await syncCandidateToATS({ ...candidate, ...parsedCv, cv_text: parsedCv.cv_text });
-    // eslint-disable-next-line no-await-in-loop
-    await sendTelegramMessage(getRecruiterChatId(), `📎 ${candidate.name} sent their CV - extracted and synced to ATS`).catch(() => null);
-  }
+  const [conversationHistory, remoteConversationHistory] = await Promise.all([
+    getConversationHistory(candidate.id),
+    getRemoteConversationHistory(messages[0]?.chatId || candidate.unipile_chat_id),
+  ]);
+  const fullConversationHistory = conversationHistory.length ? conversationHistory : remoteConversationHistory;
+  const classification = await classifyReplyBatch(
+    currentCandidate,
+    job,
+    fullConversationHistory,
+    combinedContent,
+    messages,
+    cvResult.cvText,
+  );
 
-  const classification = await classifyReply(candidate, job, fullConversationHistory, messageText);
   const archiveReason = classification.end_reason || classification.concerns || 'Archived after reply classification';
-  const shouldQueueArchiveReply = classification.next_action === 'archive' && String(classification.suggested_reply || '').trim();
+  const shouldQueueArchiveReply = classification.next_action === 'archive'
+    && Array.isArray(classification.messages_to_send)
+    && classification.messages_to_send.some((message) => String(message?.body || '').trim());
 
   if (classification.intent === 'booking_confirmed') {
     await supabase.from('candidates').update({
       pipeline_stage: 'Interview Booked',
       interview_booked_at: new Date().toISOString(),
-      ...markConversationEnded(candidate, classification.end_reason || 'Meeting booked', { archive: false }),
+      ...markConversationEnded(currentCandidate, classification.end_reason || 'Meeting booked', { archive: false }),
     }).eq('id', candidate.id);
-    await logActivity(candidate.job_id, candidate.id, 'CHAT_ENDED', `${candidate.name} conversation ended after booking confirmation`, {
+    await logActivity(candidate.job_id, candidate.id, 'CHAT_ENDED', `${currentCandidate.name} conversation ended after booking confirmation`, {
       reason: classification.end_reason || 'Meeting booked',
       automatic: true,
     });
   } else if (classification.next_action === 'archive' && !shouldQueueArchiveReply) {
     await supabase.from('candidates').update(markConversationEnded(
-      candidate,
+      currentCandidate,
       archiveReason,
       { archive: true },
     )).eq('id', candidate.id);
-    await logActivity(candidate.job_id, candidate.id, 'CHAT_ENDED', `${candidate.name} conversation ended and archived`, {
+    await logActivity(candidate.job_id, candidate.id, 'CHAT_ENDED', `${currentCandidate.name} conversation ended and archived`, {
       reason: archiveReason,
       automatic: true,
     });
@@ -236,100 +456,105 @@ export async function processIncomingMessage(webhookPayload) {
     await supabase.from('candidates').update({
       pipeline_stage: 'reply_received',
       follow_up_due_at: null,
-      ...clearEndChatRecommendation(candidate),
+      ...clearEndChatRecommendation(currentCandidate),
     }).eq('id', candidate.id);
-    await logActivity(candidate.job_id, candidate.id, 'CHAT_END_RECOMMENDED', `${candidate.name} close-out reply queued before archive`, {
+    await logActivity(candidate.job_id, candidate.id, 'CHAT_END_RECOMMENDED', `${currentCandidate.name} close-out reply queued before archive`, {
       reason: archiveReason,
       intent: classification.intent,
       final_reply_pending: true,
     });
   } else if (classification.should_end_conversation) {
-    await supabase.from('candidates').update(markEndChatRecommended(
-      candidate,
-      classification.end_reason || classification.key_points || classification.concerns || 'Conversation appears complete',
-    )).eq('id', candidate.id);
-    await logActivity(candidate.job_id, candidate.id, 'CHAT_END_RECOMMENDED', `${candidate.name} conversation looks ready to end`, {
-      reason: classification.end_reason || classification.key_points || classification.concerns || 'Conversation appears complete',
+    const recommendation = classification.end_reason || classification.key_points || classification.concerns || 'Conversation appears complete';
+    await supabase.from('candidates').update(markEndChatRecommended(currentCandidate, recommendation)).eq('id', candidate.id);
+    await logActivity(candidate.job_id, candidate.id, 'CHAT_END_RECOMMENDED', `${currentCandidate.name} conversation looks ready to end`, {
+      reason: recommendation,
       intent: classification.intent,
     });
-    await sendTelegramMessage(getRecruiterChatId(), `🧭 End chat recommended for ${candidate.name}: ${classification.end_reason || classification.key_points || 'conversation appears complete'}`).catch(() => null);
+    await sendTelegramMessage(getRecruiterChatId(), `🧭 End chat recommended for ${currentCandidate.name}: ${recommendation}`).catch(() => null);
   } else {
-    await supabase.from('candidates').update(clearEndChatRecommendation(candidate)).eq('id', candidate.id);
+    await supabase.from('candidates').update(clearEndChatRecommendation(currentCandidate)).eq('id', candidate.id);
   }
 
   if (classification.qualified && classification.intent !== 'booking_confirmed') {
     await supabase.from('candidates').update({
+      pipeline_stage: 'Qualified',
       qualified_at: new Date().toISOString(),
     }).eq('id', candidate.id);
-    await logActivity(candidate.job_id, candidate.id, 'CANDIDATE_QUALIFIED', `${candidate.name} qualified from reply`, {
+    await logActivity(candidate.job_id, candidate.id, 'CANDIDATE_QUALIFIED', `${currentCandidate.name} qualified from reply`, {
       intent: classification.intent,
-      reason: classification.reason,
       next_action: classification.next_action,
+      qualification_notes: classification.qualification_notes,
     });
-    await sendTelegramMessage(getRecruiterChatId(), `⭐ ${candidate.name} is QUALIFIED for ${job.job_title} - booking message queued for your approval`).catch(() => null);
+    await sendTelegramMessage(
+      getRecruiterChatId(),
+      `⭐ ${currentCandidate.name} is QUALIFIED for ${job.job_title}\n\nNotes: ${classification.qualification_notes || 'Qualified from reply.'}${cvResult.cvText ? '\n📄 CV received and assessed' : ''}`,
+    ).catch(() => null);
   }
 
-  if (classification.next_action === 'push_for_booking' && job?.calendly_link) {
-    await queueApproval({
-      candidateId: candidate.id,
-      jobId: candidate.job_id,
-      channel: 'linkedin_dm',
-      stage: 'in_conversation',
-      messageText: ensureSignedMessage(job, classification.suggested_reply || `Thanks for the reply. You can book a time here: ${job.calendly_link}`),
-    });
-  } else if (classification.next_action === 'push_for_booking') {
-    await queueApproval({
-      candidateId: candidate.id,
-      jobId: candidate.job_id,
-      channel: 'linkedin_dm',
-      stage: 'in_conversation',
-      messageText: ensureSignedMessage(job, classification.suggested_reply),
-    });
-  } else if (classification.next_action === 'ask_qualifying_question') {
-    await queueApproval({
-      candidateId: candidate.id,
-      jobId: candidate.job_id,
-      channel: 'linkedin_dm',
-      stage: 'in_conversation',
-      messageText: ensureSignedMessage(job, classification.suggested_reply || classification.qualifying_question_to_ask),
-    });
-  } else if (classification.next_action === 'answer_question' || classification.next_action === 'continue_conversation') {
-    await queueApproval({
-      candidateId: candidate.id,
-      jobId: candidate.job_id,
-      channel: 'linkedin_dm',
-      stage: 'in_conversation',
-      messageText: ensureSignedMessage(job, classification.suggested_reply),
-    });
-  } else if (classification.next_action === 'polite_decline') {
-    await queueApproval({
-      candidateId: candidate.id,
-      jobId: candidate.job_id,
-      channel: 'linkedin_dm',
-      stage: 'Archived',
-      messageText: ensureSignedMessage(job, classification.suggested_reply),
-    });
-  } else if (classification.next_action === 'archive') {
-    await queueApproval({
-      candidateId: candidate.id,
-      jobId: candidate.job_id,
-      channel: 'linkedin_dm',
-      stage: 'Archived',
-      messageText: ensureSignedMessage(job, classification.suggested_reply),
-    });
-    await logActivity(candidate.job_id, candidate.id, 'CANDIDATE_ARCHIVED', `${candidate.name} marked for archive after final reply`, {
+  const queuedReplies = await queueRepliesFromClassification(currentCandidate, job, channel, classification, combinedContent);
+  if (!queuedReplies) {
+    await logActivity(candidate.job_id, candidate.id, 'REPLY_NO_ACTION', `[${job.job_title}]: ${currentCandidate.name} replied - no response needed (${classification.intent})`, {
       intent: classification.intent,
-      concerns: classification.concerns,
-      final_reply_pending: true,
+      message_count: messages.length,
     });
   }
 
-  await logActivity(candidate.job_id, candidate.id, 'REPLY_RECEIVED', `${candidate.name} replied on LinkedIn`, {
+  await logActivity(candidate.job_id, candidate.id, 'REPLY_RECEIVED', `${currentCandidate.name} replied on ${channel}`, {
     classification,
-    message_text: messageText,
+    combined_content: combinedContent,
+    message_count: messages.length,
     conversation_messages: fullConversationHistory.length,
   });
 
-  await sendTelegramMessage(getRecruiterChatId(), `💬 ${candidate.name} replied to your ${channel} - staging for qualification`).catch(() => null);
   return classification;
+}
+
+async function flushMessageBatch(candidateId) {
+  const batch = messageDebounceMap.get(candidateId);
+  messageDebounceMap.delete(candidateId);
+  if (!batch?.messages?.length) return null;
+
+  console.log(`[REPLY] Processing ${batch.messages.length} batched message(s) from ${batch.candidate.name}`);
+  return processBatchedMessages(batch.candidate, batch.messages);
+}
+
+export async function processIncomingMessage(webhookPayload) {
+  const messageText = String(webhookPayload.text || webhookPayload.message_text || webhookPayload.data?.text || '').trim();
+  const attachments = webhookPayload.attachments || webhookPayload.data?.attachments || [];
+  const messageId = extractMessageId(webhookPayload);
+
+  if (!messageText && !attachments.length) {
+    return null;
+  }
+
+  if (messageId) {
+    if (hasRecentMessageId(messageId)) {
+      return null;
+    }
+    const { data: existingConversation } = await supabase
+      .from('conversations')
+      .select('id')
+      .eq('unipile_message_id', messageId)
+      .limit(1)
+      .maybeSingle();
+    if (existingConversation) {
+      rememberRecentMessageId(messageId);
+      return null;
+    }
+  }
+
+  const candidate = await findCandidateForPayload(webhookPayload);
+  if (!candidate) {
+    console.warn('[replyHandler] unknown incoming message', {
+      chatId: webhookPayload.chat_id || webhookPayload.data?.chat_id || null,
+      senderProviderIds: extractSenderProviderIds(webhookPayload),
+      senderEmail: webhookPayload.from_attendee?.identifier || webhookPayload.sender_email || null,
+      messageId,
+    });
+    return null;
+  }
+
+  rememberRecentMessageId(messageId);
+  addMessageToBatch(candidate, webhookPayload);
+  return { batched: true, candidateId: candidate.id };
 }
