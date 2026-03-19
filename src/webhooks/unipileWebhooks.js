@@ -37,54 +37,10 @@ export function createUnipileWebhookRouter() {
     };
   }
 
-  router.post('/messages', async (req, res) => {
-    const payload = req.body || {};
-    res.status(200).json({ ok: true });
-
-    try {
-      await logWebhook(payload.event, payload);
-    } catch (error) {
-      console.error('[webhooks.messages] failed to log payload', error.message);
-    }
-
-    if (payload.event === 'message_received') {
-      const linkedinAccountId = await getLiveCredential('UNIPILE_LINKEDIN_ACCOUNT_ID');
-      if (payload.account_id && payload.account_id !== linkedinAccountId) return;
-      const senderId = payload.sender?.attendee_provider_id || payload.sender?.provider_id || null;
-      const ownUserId = payload.account_info?.user_id || null;
-      if (senderId && ownUserId && senderId === ownUserId) return;
-      await processIncomingMessage(normaliseMessagingPayload(payload)).catch((error) => {
-        console.error('[webhooks.messages] processing failed', error);
-      });
-      return;
-    }
-
-    if (payload.event === 'mail_received') {
-      const emailAccountId = await getLiveCredential('UNIPILE_EMAIL_ACCOUNT_ID');
-      if (payload.account_id && emailAccountId && payload.account_id !== emailAccountId) return;
-      const fromEmail = payload.from_attendee?.identifier || null;
-      const ownReplyEmail = getRuntimeConfigValue('REPLY_TO_EMAIL') || null;
-      if (ownReplyEmail && fromEmail && fromEmail.toLowerCase() === ownReplyEmail.toLowerCase()) return;
-      await processIncomingMessage(normaliseEmailPayload(payload)).catch((error) => {
-        console.error('[webhooks.email] processing failed', error);
-      });
-    }
-  });
-
-  router.post('/relations', async (req, res) => {
-    const payload = req.body || {};
-    res.status(200).json({ ok: true });
-
-    try {
-      await logWebhook(payload.event, payload);
-    } catch (error) {
-      console.error('[webhooks.relations] failed to log payload', error.message);
-    }
-
-    if (payload.event !== 'new_relation') return;
+  async function handleLinkedInRelationPayload(payload) {
     const providerId = payload.account_member_id || payload.attendee_provider_id || payload.provider_id || payload.user_provider_id || payload.user?.provider_id || payload.user?.attendee_provider_id || null;
     if (!providerId) {
-      console.log('[WEBHOOK] new_relation: no provider ID - ignoring');
+      console.log('[WEBHOOK] relation event without provider ID - ignoring');
       return;
     }
 
@@ -119,6 +75,63 @@ export function createUnipileWebhookRouter() {
       payload,
     );
     await sendTelegramMessage(getRecruiterChatId(), `🤝 Connection accepted: ${candidate.name} at ${candidate.current_company || 'unknown firm'} - queued for DM draft`).catch(() => null);
+  }
+
+  router.post('/messages', async (req, res) => {
+    const payload = req.body || {};
+    res.status(200).json({ ok: true });
+
+    try {
+      await logWebhook(payload.event, payload);
+    } catch (error) {
+      console.error('[webhooks.messages] failed to log payload', error.message);
+    }
+
+    if (['message_received', 'message.created'].includes(payload.event)) {
+      const linkedinAccountId = await getLiveCredential('UNIPILE_LINKEDIN_ACCOUNT_ID');
+      if (payload.account_id && payload.account_id !== linkedinAccountId) return;
+      const senderId = payload.sender?.attendee_provider_id || payload.sender?.provider_id || null;
+      const ownUserId = payload.account_info?.user_id || null;
+      if (senderId && ownUserId && senderId === ownUserId) return;
+      await processIncomingMessage(normaliseMessagingPayload(payload)).catch((error) => {
+        console.error('[webhooks.messages] processing failed', error);
+      });
+      return;
+    }
+
+    if (['mail_received', 'email.new', 'email.replied'].includes(payload.event)) {
+      const emailAccountId = await getLiveCredential('UNIPILE_EMAIL_ACCOUNT_ID');
+      if (payload.account_id && emailAccountId && payload.account_id !== emailAccountId) return;
+      const fromEmail = payload.from_attendee?.identifier || null;
+      const ownReplyEmail = getRuntimeConfigValue('REPLY_TO_EMAIL') || null;
+      if (ownReplyEmail && fromEmail && fromEmail.toLowerCase() === ownReplyEmail.toLowerCase()) return;
+      await processIncomingMessage(normaliseEmailPayload(payload)).catch((error) => {
+        console.error('[webhooks.email] processing failed', error);
+      });
+      return;
+    }
+
+    if (['new_relation', 'relation.created', 'invitation.accepted'].includes(payload.event)) {
+      await handleLinkedInRelationPayload(payload).catch((error) => {
+        console.error('[webhooks.relations] processing failed', error);
+      });
+    }
+  });
+
+  router.post('/relations', async (req, res) => {
+    const payload = req.body || {};
+    res.status(200).json({ ok: true });
+
+    try {
+      await logWebhook(payload.event, payload);
+    } catch (error) {
+      console.error('[webhooks.relations] failed to log payload', error.message);
+    }
+
+    if (!['new_relation', 'relation.created', 'invitation.accepted'].includes(payload.event)) return;
+    await handleLinkedInRelationPayload(payload).catch((error) => {
+      console.error('[webhooks.relations] processing failed', error);
+    });
   });
 
   return router;

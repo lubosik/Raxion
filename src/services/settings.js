@@ -12,6 +12,10 @@ const LIVE_CREDENTIAL_KEYS = [
 let credentialCache = {};
 let cacheExpiry = 0;
 
+function liveCredentialKeys(key) {
+  return [key, `${RUNTIME_ENV_PREFIX}${key}`];
+}
+
 export async function getSetting(key, fallback = null) {
   try {
     const { data } = await supabase.from('raxion_settings').select('value').eq('key', key).maybeSingle();
@@ -39,7 +43,7 @@ export async function getLiveCredential(key) {
   const now = Date.now();
   if (now > cacheExpiry || credentialCache[key] == null) {
     try {
-      const settingKeys = LIVE_CREDENTIAL_KEYS.map((item) => `${RUNTIME_ENV_PREFIX}${item}`);
+      const settingKeys = LIVE_CREDENTIAL_KEYS.flatMap((item) => liveCredentialKeys(item));
       const { data } = await supabase
         .from('raxion_settings')
         .select('key, value')
@@ -48,7 +52,8 @@ export async function getLiveCredential(key) {
       credentialCache = {};
       for (const row of data || []) {
         const rawKey = String(row.key || '').replace(RUNTIME_ENV_PREFIX, '');
-        if (row.value) credentialCache[rawKey] = row.value;
+        if (!row.value || credentialCache[rawKey]) continue;
+        credentialCache[rawKey] = row.value;
       }
       cacheExpiry = now + (30 * 1000);
     } catch (error) {
@@ -58,6 +63,31 @@ export async function getLiveCredential(key) {
   }
 
   return credentialCache[key] || process.env[key] || null;
+}
+
+export async function setLiveCredential(key, value) {
+  if (!LIVE_CREDENTIAL_KEYS.includes(key)) {
+    throw new Error(`Unknown live credential key: ${key}`);
+  }
+
+  const stringValue = String(value ?? '');
+  const updatedAt = new Date().toISOString();
+
+  try {
+    await supabase.from('raxion_settings').upsert(
+      liveCredentialKeys(key).map((settingKey) => ({
+        key: settingKey,
+        value: stringValue,
+        updated_at: updatedAt,
+      })),
+      { onConflict: 'key' },
+    );
+    process.env[key] = stringValue;
+    invalidateCredentialCache();
+  } catch (error) {
+    await logError('settings.setLiveCredential', error, 'error');
+    throw error;
+  }
 }
 
 export function invalidateCredentialCache() {

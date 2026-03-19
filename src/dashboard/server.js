@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import supabase from '../db/supabase.js';
-import { listLinkedInJobPostings } from '../integrations/unipile.js';
+import { getCurrentWebhooks, listLinkedInJobPostings, recreateAllWebhooks } from '../integrations/unipile.js';
 import { activityStream, fetchJobMetrics, logActivity } from '../services/activityLogger.js';
 import { sourceCandidatesForJob } from '../services/candidateSourcing.js';
 import { postJobToLinkedIn, ingestJobApplicants, closeLinkedInJob } from '../services/jobPostingService.js';
@@ -24,7 +24,7 @@ import { generateInterviewBrief } from '../services/qualificationEngine.js';
 import { getRuntimeState, toggleRuntimeStateValue } from '../services/runtimeState.js';
 import { listRuntimeConfig, setRuntimeConfigValue, deleteRuntimeConfigValue } from '../services/configService.js';
 import { getIntegrationHealth, testUnipileConnection } from '../services/healthService.js';
-import { getSetting, setSetting, invalidateCredentialCache } from '../services/settings.js';
+import { getLiveCredential, getSetting, setLiveCredential, setSetting } from '../services/settings.js';
 import { markConversationEnded } from '../services/conversationState.js';
 import { getExecutionQueueSnapshot } from '../services/jobExecutionQueue.js';
 import {
@@ -653,12 +653,47 @@ export function createDashboardServer() {
         'UNIPILE_EMAIL_ACCOUNT_ID',
       ].filter((key) => req.body[key] !== undefined && req.body[key] !== '');
 
-      await Promise.all(updates.map((key) => setRuntimeConfigValue(key, req.body[key])));
-      invalidateCredentialCache();
+      await Promise.all(updates.map((key) => setLiveCredential(key, req.body[key])));
 
       res.json({ success: true, message: 'Credentials updated - active immediately on next API call.' });
     } catch (error) {
       res.status(400).json({ error: error.message });
+    }
+  });
+
+  app.get('/api/webhooks', async (req, res) => {
+    try {
+      const [webhooks, linkedinAccountId, emailAccountId, dsn] = await Promise.all([
+        getCurrentWebhooks(),
+        getLiveCredential('UNIPILE_LINKEDIN_ACCOUNT_ID'),
+        getLiveCredential('UNIPILE_EMAIL_ACCOUNT_ID'),
+        getLiveCredential('UNIPILE_DSN'),
+      ]);
+
+      res.json({
+        success: true,
+        webhooks,
+        accounts: {
+          linkedin: linkedinAccountId || null,
+          email: emailAccountId || null,
+        },
+        base_url: dsn ? `https://${dsn}/api/v1` : null,
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.post('/api/webhooks/recreate', async (req, res) => {
+    try {
+      const result = await recreateAllWebhooks();
+      res.json({
+        success: true,
+        message: 'Webhooks recreated successfully.',
+        result,
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
     }
   });
 

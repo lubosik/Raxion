@@ -9,7 +9,7 @@ import { startInboxMonitor } from './src/inboxMonitor.js';
 import { runOrchestratorCycle } from './src/services/outreachSequencer.js';
 import { sendTelegramMessage, getRecruiterChatId } from './src/integrations/telegram.js';
 import { logError } from './src/lib_errors.js';
-import { setupWebhooks } from './src/integrations/unipile.js';
+import { recreateAllWebhooks } from './src/integrations/unipile.js';
 import { ensureSchemaReady } from './src/services/schemaService.js';
 import { hydrateRuntimeConfig } from './src/services/configService.js';
 
@@ -72,7 +72,7 @@ async function bootstrap() {
     await testSupabase();
     await ensureSchemaReady();
     await hydrateRuntimeConfig();
-    await setupWebhooks();
+    await recreateAllWebhooks();
     startTelegramBot();
     startInboxMonitor();
     registerCronJobs();

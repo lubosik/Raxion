@@ -10,6 +10,7 @@
     runtime: null,
     health: null,
     config: [],
+    webhooks: null,
     linkedinJobPostings: [],
     onboarding: null,
     selectedJobId: null,
@@ -515,7 +516,7 @@
     state.loading = true;
     render();
 
-    const [stats, jobs, inbox, activity, approvals, runtime, health, config, onboarding, linkedinJobPostings] = await Promise.all([
+    const [stats, jobs, inbox, activity, approvals, runtime, health, config, onboarding, linkedinJobPostings, webhooks] = await Promise.all([
       request('/api/stats'),
       request('/api/jobs'),
       request('/api/inbox'),
@@ -526,6 +527,7 @@
       request('/api/config'),
       request('/api/onboarding'),
       request('/api/linkedin/job-postings').catch(() => []),
+      request('/api/webhooks').catch(() => ({ success: false, webhooks: [], accounts: {} })),
     ]);
 
     const candidateResponses = await Promise.all(
@@ -540,6 +542,7 @@
     state.runtime = runtime;
     state.health = health;
     state.config = config || [];
+    state.webhooks = webhooks || null;
     state.linkedinJobPostings = linkedinJobPostings || [];
     state.onboarding = onboarding || null;
     state.jobCandidates = Object.fromEntries(candidateResponses);
@@ -1056,6 +1059,12 @@
     }, {});
     const unipileFields = (groupedConfig.Unipile || []).filter((field) => field.key.startsWith('UNIPILE_'));
     delete groupedConfig.Unipile;
+    const webhookItems = state.webhooks?.webhooks || [];
+    const webhookAccounts = state.webhooks?.accounts || {};
+    const linkedinWebhook = webhookItems.find((item) => item.account_id === webhookAccounts.linkedin);
+    const emailWebhook = webhookItems.find((item) => item.account_id === webhookAccounts.email);
+    const linkedinWebhookUrl = linkedinWebhook?.url || linkedinWebhook?.request_url || '—';
+    const emailWebhookUrl = emailWebhook?.url || emailWebhook?.request_url || '—';
 
     return (
       '<section class="view-section">' +
@@ -1085,6 +1094,14 @@
             '</form>' +
           '</section>'
         ) : '') +
+        '<section class="config-group">' +
+          '<div><div class="label-caps">Webhooks</div><h3 class="section-title small">Webhook Manager</h3><div class="candidate-sub">Deletes all existing Unipile webhooks and recreates LinkedIn and Email listeners for the current live credentials.</div></div>' +
+          '<div class="config-grid">' +
+            `<div class="config-card"><div class="config-head"><div><div class="label-caps">LinkedIn</div><h3 class="section-title small">${linkedinWebhook ? 'Active' : 'None'}</h3><div class="candidate-sub">${esc(webhookAccounts.linkedin || 'No account configured')}</div></div></div><div class="candidate-sub">${linkedinWebhook ? '● Active' : '○ None'}</div><div class="candidate-sub mono-text">${esc(linkedinWebhookUrl)}</div></div>` +
+            `<div class="config-card"><div class="config-head"><div><div class="label-caps">Email</div><h3 class="section-title small">${emailWebhook ? 'Active' : 'None'}</h3><div class="candidate-sub">${esc(webhookAccounts.email || 'No account configured')}</div></div></div><div class="candidate-sub">${emailWebhook ? '● Active' : '○ None'}</div><div class="candidate-sub mono-text">${esc(emailWebhookUrl)}</div></div>` +
+            '<div class="config-card"><div class="config-head"><div><div class="label-caps">Actions</div><h3 class="section-title small">Recreate Webhooks</h3><div class="candidate-sub">Deletes all existing webhooks and creates fresh subscriptions pointing at `/webhooks/unipile/messages`.</div></div></div><div class="button-row"><button class="btn btn-primary btn-sm" type="button" data-action="recreate-webhooks" id="recreate-webhooks-btn">↻ Recreate Webhooks</button></div></div>' +
+          '</div>' +
+        '</section>' +
         Object.entries(groupedConfig).map(([category, fields]) => (
           '<section class="config-group">' +
             `<div><div class="label-caps">${esc(category)}</div><h3 class="section-title small">${esc(category)} Controls</h3></div>` +
@@ -1587,6 +1604,26 @@
       return;
     }
 
+    if (action === 'recreate-webhooks') {
+      const btn = document.getElementById('recreate-webhooks-btn');
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Recreating...';
+      }
+      try {
+        const result = await request('/api/webhooks/recreate', { method: 'POST' });
+        state.webhooks = await request('/api/webhooks').catch(() => state.webhooks);
+        showToast(result.message || 'Webhooks recreated.', 'success');
+        render();
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = '↻ Recreate Webhooks';
+        }
+      }
+      return;
+    }
+
     if (action === 'clear-pipeline') {
       const confirmed = window.confirm(
         'Clear the entire pipeline?\n\nThis will permanently delete all candidates from all jobs.\nJobs will remain intact and can be re-sourced.\n\nThis cannot be undone.',
@@ -1853,6 +1890,7 @@
       await loadCoreData();
       state.view = 'controls';
       render();
+      return;
     }
   });
 

@@ -113,6 +113,10 @@ async function listAllWebhooks() {
   return items;
 }
 
+function extractWebhookId(webhook) {
+  return webhook?.id || webhook?.webhook_id || null;
+}
+
 const SEARCH_PARAMETER_TYPES = {
   industry: 'INDUSTRY',
   location: 'LOCATION',
@@ -457,51 +461,72 @@ export async function getSearchParameters(type, keywords) {
   return result?.items || result?.results || result || [];
 }
 
-export async function setupWebhooks() {
+export async function recreateAllWebhooks() {
   const serverBaseUrl = normalizeServerBaseUrl(getRuntimeConfigValue('SERVER_BASE_URL'));
-  const linkedinAccountId = await getLinkedinAccountId();
+  const [linkedinAccountId, emailAccountId] = await Promise.all([
+    getLinkedinAccountId(),
+    getEmailAccountId(),
+  ]);
+
   if (!serverBaseUrl) {
-    console.warn('[unipile] skipping webhook setup: SERVER_BASE_URL is not configured');
+    console.warn('[WEBHOOK] skipping recreation: SERVER_BASE_URL is not configured');
     return false;
   }
 
   const webhooks = await listAllWebhooks();
-  const targets = [
-    {
-      name: 'Raxion Messaging',
-      source: 'messaging',
-      request_url: `${serverBaseUrl}/webhooks/unipile/messages`,
-      format: 'json',
-      enabled: true,
-      account_ids: linkedinAccountId ? [linkedinAccountId] : undefined,
-      events: ['message_received'],
-      headers: [{ key: 'Content-Type', value: 'application/json' }],
-    },
-    {
-      name: 'Raxion Relations',
-      source: 'users',
-      request_url: `${serverBaseUrl}/webhooks/unipile/relations`,
-      format: 'json',
-      enabled: true,
-      account_ids: linkedinAccountId ? [linkedinAccountId] : undefined,
-      events: ['new_relation'],
-      headers: [{ key: 'Content-Type', value: 'application/json' }],
-    },
-  ];
-
-  for (const target of targets) {
-    const found = webhooks.find((item) => item.source === target.source && item.request_url === target.request_url);
-    if (!found) {
-      // eslint-disable-next-line no-await-in-loop
-      const created = await request('/webhooks', {
-        method: 'POST',
-        body: target,
-      });
-      console.log('[unipile] webhook created', { source: target.source, request_url: target.request_url, webhook_id: created?.webhook_id || null });
-      // eslint-disable-next-line no-await-in-loop
-      await sleep(1000);
-    }
+  for (const webhook of webhooks) {
+    const webhookId = extractWebhookId(webhook);
+    if (!webhookId) continue;
+    // eslint-disable-next-line no-await-in-loop
+    await request(`/webhooks/${encodeURIComponent(webhookId)}`, { method: 'DELETE' });
+    console.log(`[WEBHOOK] Deleted old webhook: ${webhookId}`);
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(250);
   }
 
-  return true;
+  let linkedinResult = null;
+  let emailResult = null;
+
+  if (linkedinAccountId) {
+    linkedinResult = await request('/webhooks', {
+      method: 'POST',
+      body: {
+        account_id: linkedinAccountId,
+        url: `${serverBaseUrl}/webhooks/unipile/messages`,
+        events: ['message.created', 'relation.created', 'invitation.accepted'],
+      },
+    });
+    if (!linkedinResult) {
+      throw new Error('Failed to create LinkedIn webhook');
+    }
+    console.log('[WEBHOOK] LinkedIn webhook created:', extractWebhookId(linkedinResult) || linkedinResult);
+  }
+
+  if (emailAccountId) {
+    emailResult = await request('/webhooks', {
+      method: 'POST',
+      body: {
+        account_id: emailAccountId,
+        url: `${serverBaseUrl}/webhooks/unipile/messages`,
+        events: ['email.new', 'email.replied'],
+      },
+    });
+    if (!emailResult) {
+      throw new Error('Failed to create Email webhook');
+    }
+    console.log('[WEBHOOK] Email webhook created:', extractWebhookId(emailResult) || emailResult);
+  }
+
+  return {
+    linkedin: linkedinResult,
+    email: emailResult,
+  };
+}
+
+export async function setupWebhooks() {
+  return recreateAllWebhooks();
+}
+
+export async function getCurrentWebhooks() {
+  return listAllWebhooks();
 }
