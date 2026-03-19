@@ -17,8 +17,11 @@ async function withJobTitlePrefix(jobId, summary) {
   if (!jobId || !summary) return summary;
   const jobTitle = await getJobTitle(jobId);
   if (!jobTitle) return summary;
-  if (String(summary).startsWith(`${jobTitle}: `)) return summary;
-  return `${jobTitle}: ${summary}`;
+  const normalizedSummary = String(summary);
+  if (normalizedSummary.startsWith(`${jobTitle}: `)) return normalizedSummary;
+  if (normalizedSummary.startsWith(`[${jobTitle}]: `)) return normalizedSummary;
+  if (/^\[[^\]]+\]:\s/.test(normalizedSummary)) return normalizedSummary;
+  return `[${jobTitle}]: ${normalizedSummary}`;
 }
 
 export async function logActivity(jobId, candidateId, eventType, summary, detail = {}) {

@@ -1,6 +1,7 @@
 import supabase from '../db/supabase.js';
 import { callClaude, extractDocumentData } from '../integrations/claude.js';
-import { downloadAttachment, getChatMessages } from '../integrations/unipile.js';
+import { downloadAttachment, getChatMessages, getLinkedInProfile } from '../integrations/unipile.js';
+import { searchWeb } from '../integrations/grok.js';
 import { sendTelegramMessage, getRecruiterChatId } from '../integrations/telegram.js';
 import { syncCandidateToATS } from '../integrations/zohoRecruit.js';
 import { isDuplicateApproval, queueApproval } from './approvalService.js';
@@ -278,12 +279,91 @@ function buildClassificationFallback() {
   };
 }
 
-async function classifyReplyBatch(candidate, job, conversationHistory, combinedContent, messages, cvText) {
+async function fetchCandidateProfileIfNeeded(candidate) {
+  if ((candidate.tech_skills || candidate.past_employers) || !candidate.linkedin_provider_id) {
+    return null;
+  }
+
+  try {
+    return await getLinkedInProfile(candidate.linkedin_provider_id);
+  } catch (error) {
+    console.warn(`[REPLY] Unipile profile fetch failed for ${candidate.name}: ${error.message}`);
+    return null;
+  }
+}
+
+function detectResearchNeeded(candidate, combinedContent) {
+  const researchTriggers = [
+    'your company',
+    'what you do',
+    'tell me more about',
+    'what is',
+    'how does',
+    'salary',
+    'market',
+    'similar roles',
+    'other companies',
+    'competitors',
+    'news',
+    'recent',
+    'funding',
+    'growth',
+    'remote',
+    'location',
+    'visa',
+  ];
+
+  const lower = String(combinedContent || '').toLowerCase();
+  return Boolean(candidate.current_company) || researchTriggers.some((trigger) => lower.includes(trigger));
+}
+
+async function conductMidConversationResearch(candidate, combinedContent, job) {
+  if (!detectResearchNeeded(candidate, combinedContent)) {
+    return { researchContext: '', used: false };
+  }
+
+  const companyQuery = candidate.current_company
+    ? `What does ${candidate.current_company} do? What industry are they in, how large are they, and is there any recent notable news? Keep it brief and factual.`
+    : null;
+  const questionQuery = `In the context of recruiting for ${job.job_title} in ${job.location || 'the target market'}: ${String(combinedContent || '').slice(0, 300)}. Provide 2-3 specific facts that help a recruiter answer accurately and naturally.`;
+
+  const [companyResult, questionResult, profileResult] = await Promise.allSettled([
+    companyQuery ? searchWeb(companyQuery) : Promise.resolve(null),
+    searchWeb(questionQuery),
+    fetchCandidateProfileIfNeeded(candidate),
+  ]);
+
+  const blocks = [];
+  const companyContext = companyResult.status === 'fulfilled' ? companyResult.value : null;
+  const questionContext = questionResult.status === 'fulfilled' ? questionResult.value : null;
+  const profileContext = profileResult.status === 'fulfilled' ? profileResult.value : null;
+
+  if (companyContext) blocks.push(`Company context:\n${companyContext}`);
+  if (questionContext) blocks.push(`Question context:\n${questionContext}`);
+  if (profileContext) {
+    blocks.push(`LinkedIn profile context:\n${JSON.stringify({
+      headline: profileContext.headline || profileContext.title || null,
+      current_company: profileContext.current_company || profileContext.company || null,
+      skills: profileContext.skills || null,
+      experience: profileContext.experiences || profileContext.experience || null,
+    })}`);
+  }
+
+  return {
+    researchContext: blocks.join('\n\n'),
+    used: blocks.length > 0,
+  };
+}
+
+async function classifyReplyBatch(candidate, job, conversationHistory, combinedContent, messages, cvText, researchContext = '') {
   const qualificationBlock = job.qualified_criteria
     ? `QUALIFICATION CRITERIA:\n${job.qualified_criteria}`
     : 'QUALIFICATION CRITERIA:\nNone specified.';
   const agentGuidance = getAgentGuidanceBlock() || 'None';
   const cvContext = cvText ? `\n\nCV PROVIDED BY CANDIDATE:\n${cvText}` : '';
+  const researchBlock = researchContext
+    ? `\n\nREAL-TIME RESEARCH (weave in naturally, do not quote verbatim):\n${researchContext}`
+    : '';
   const prompt = `You are classifying a candidate reply for the role: ${job.job_title} at ${job.client_name}.
 
 ${qualificationBlock}
@@ -296,7 +376,7 @@ FULL CONVERSATION SO FAR:
 ${buildConversationContext(conversationHistory, candidate.name)}
 
 LATEST MESSAGES FROM CANDIDATE (may be multiple sent in sequence):
-${combinedContent}${cvContext}
+${combinedContent}${cvContext}${researchBlock}
 
 The candidate sent ${messages.length} message(s). Treat them as one coherent turn.
 
@@ -378,7 +458,7 @@ async function queueRepliesFromClassification(candidate, job, channel, classific
 
     if (!queued) continue;
     queuedCount += 1;
-    await logActivity(job.id, candidate.id, 'REPLY_QUEUED', `[${job.job_title}]: Reply drafted for ${candidate.name}${contextLabel ? ` (${contextLabel})` : ''} - awaiting approval`, {
+    await logActivity(job.id, candidate.id, 'REPLY_QUEUED', `[${job.job_title}]: Reply drafted for ${candidate.name} (${candidate.current_title || 'unknown title'} at ${candidate.current_company || 'unknown company'})${contextLabel ? ` (${contextLabel})` : ''} - awaiting approval`, {
       approval_id: queued.id,
       channel: outboundChannel,
       message_type: messageType,
@@ -418,6 +498,7 @@ async function processBatchedMessages(candidate, messages) {
     getRemoteConversationHistory(messages[0]?.chatId || candidate.unipile_chat_id),
   ]);
   const fullConversationHistory = conversationHistory.length ? conversationHistory : remoteConversationHistory;
+  const { researchContext, used: researchUsed } = await conductMidConversationResearch(currentCandidate, combinedContent, job);
   const classification = await classifyReplyBatch(
     currentCandidate,
     job,
@@ -425,6 +506,7 @@ async function processBatchedMessages(candidate, messages) {
     combinedContent,
     messages,
     cvResult.cvText,
+    researchContext,
   );
 
   const archiveReason = classification.end_reason || classification.concerns || 'Archived after reply classification';
@@ -499,11 +581,19 @@ async function processBatchedMessages(candidate, messages) {
     });
   }
 
-  await logActivity(candidate.job_id, candidate.id, 'REPLY_RECEIVED', `${currentCandidate.name} replied on ${channel}`, {
+  if (researchUsed) {
+    await logActivity(candidate.job_id, candidate.id, 'MID_CONVERSATION_RESEARCH', `[${job.job_title}]: Research conducted for reply to ${currentCandidate.name} (${currentCandidate.current_title || 'unknown title'} at ${currentCandidate.current_company || 'unknown company'})`, {
+      research_used: true,
+      candidate_company: currentCandidate.current_company || null,
+    });
+  }
+
+  await logActivity(candidate.job_id, candidate.id, 'REPLY_RECEIVED', `[${job.job_title}]: ${currentCandidate.name} replied on ${channel} (${currentCandidate.current_title || 'unknown title'} at ${currentCandidate.current_company || 'unknown company'})`, {
     classification,
     combined_content: combinedContent,
     message_count: messages.length,
     conversation_messages: fullConversationHistory.length,
+    research_used: researchUsed,
   });
 
   return classification;

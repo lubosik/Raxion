@@ -65,6 +65,7 @@
     edited: { cls: 'stage-enriched', label: 'Edited' },
     approved: { cls: 'stage-qualified', label: 'Approved' },
     sent: { cls: 'stage-dm', label: 'Sent' },
+    skipped: { cls: 'stage-archived', label: 'Skipped' },
     rejected: { cls: 'stage-rejected', label: 'Rejected' },
     error: { cls: 'stage-rejected', label: 'Error' },
   };
@@ -100,10 +101,13 @@
     'ENRICHMENT_ATTEMPTED',
     'MESSAGE_DRAFTED',
     'MESSAGE_APPROVED',
+    'APPROVAL_ACTIONED',
+    'APPROVAL_SKIPPED',
     'MESSAGE_SENT',
     'INVITE_SENT',
     'INVITE_ACCEPTED',
     'REPLY_RECEIVED',
+    'MID_CONVERSATION_RESEARCH',
     'MESSAGE_SEND_ERROR',
   ];
 
@@ -147,6 +151,58 @@
   function stageChip(stage) {
     const meta = stageInfo(stage);
     return `<span class="stage-chip ${meta.cls}">${esc(meta.label)}</span>`;
+  }
+
+  function approvalStatusText(status) {
+    return {
+      approved: 'Approved - queued to send',
+      sent: 'Sent',
+      skipped: 'Skipped',
+      rejected: 'Skipped',
+      error: 'Error',
+    }[status] || stageInfo(status).label;
+  }
+
+  function approvalStatusChip(status) {
+    const chipStatus = status === 'rejected' ? 'skipped' : status;
+    const meta = stageInfo(chipStatus);
+    return `<span class="stage-chip ${meta.cls}">${esc(approvalStatusText(status))}</span>`;
+  }
+
+  function upsertApprovalState(approvalId, updates = {}) {
+    const collections = [state.approvals, state.selectedJobApprovals, state.candidatePanelDetail?.approvals].filter(Boolean);
+    collections.forEach((items) => {
+      const target = items.find((item) => item.id === approvalId);
+      if (!target) return;
+      Object.assign(target, updates);
+    });
+  }
+
+  function removeApprovalActions(approvalId, newStatus) {
+    const collections = [state.approvals, state.selectedJobApprovals, state.candidatePanelDetail?.approvals].filter(Boolean);
+    let approval = null;
+    collections.forEach((items) => {
+      const target = items.find((item) => item.id === approvalId);
+      if (!target) return;
+      target.status = newStatus;
+      target._faded = newStatus !== 'pending' && newStatus !== 'edited';
+      approval = approval || target;
+    });
+
+    if (!approval) return;
+    const candidateStage = newStatus === 'approved'
+      ? (approval.channel === 'email' ? 'email_approved' : approval.channel === 'linkedin_dm' ? 'dm_approved' : null)
+      : newStatus === 'sent'
+        ? (approval.channel === 'email' ? 'email_sent' : approval.channel === 'linkedin_dm' ? 'dm_sent' : null)
+        : null;
+    if (!candidateStage) return;
+
+    [state.jobCandidates[approval.job_id], state.selectedJobCandidates, state.candidatePanelDetail ? [state.candidatePanelDetail] : []]
+      .filter(Boolean)
+      .forEach((candidates) => {
+        const candidate = candidates.find((item) => item.id === approval.candidate_id);
+        if (candidate) candidate.pipeline_stage = candidateStage;
+      });
   }
 
   function scoreClass(score) {
@@ -403,20 +459,20 @@
   function activityGroupFor(eventType) {
     const type = String(eventType || '');
     if (/ERROR|FAILED/.test(type)) return 'errors';
-    if (/REPLY|QUALIFIED/.test(type)) return 'replies';
+    if (/REPLY|QUALIFIED|MID_CONVERSATION_RESEARCH/.test(type)) return 'replies';
     if (/ENRICHMENT/.test(type)) return 'enrichment';
-    if (/INVITE|MESSAGE_SENT|OUTSIDE_SENDING_WINDOW/.test(type)) return 'outreach';
+    if (/INVITE|MESSAGE_SENT|APPROVAL_ACTIONED|APPROVAL_SKIPPED|OUTSIDE_SENDING_WINDOW/.test(type)) return 'outreach';
     if (/MESSAGE_/.test(type)) return 'messages';
     return 'all';
   }
 
   function activityChipClass(eventType) {
     const type = String(eventType || '');
-    if (type === 'MESSAGE_DRAFTED' || type === 'MESSAGE_APPROVED' || type === 'MESSAGE_SENT') return 'chip-message';
+    if (type === 'MESSAGE_DRAFTED' || type === 'MESSAGE_APPROVED' || type === 'MESSAGE_SENT' || type === 'APPROVAL_ACTIONED' || type === 'APPROVAL_SKIPPED') return 'chip-message';
     if (type === 'ENRICHMENT_ATTEMPTED' || type === 'CANDIDATE_ENRICHMENT_NO_DATA' || type === 'CANDIDATE_ENRICHED') return 'chip-enrichment';
     if (type === 'INVITE_SENT') return 'chip-invite';
     if (type === 'INVITE_ACCEPTED') return 'chip-accepted';
-    if (type === 'REPLY_RECEIVED' || type === 'CANDIDATE_QUALIFIED') return 'chip-reply';
+    if (type === 'REPLY_RECEIVED' || type === 'CANDIDATE_QUALIFIED' || type === 'MID_CONVERSATION_RESEARCH') return 'chip-reply';
     if (/ERROR|FAILED/.test(type)) return 'chip-error';
     if (type === 'OUTSIDE_SENDING_WINDOW') return 'chip-window';
     return 'chip-default';
@@ -944,12 +1000,12 @@
   function renderApprovals() {
     const cards = (state.approvals || []).map((item) => {
       const faded = item._faded ? ' approval-faded' : '';
-      const actions = ['approved', 'sent', 'rejected', 'error'].includes(item.status)
-        ? `<div class="approval-approved"><span class="stage-chip ${stageInfo(item.status).cls}">${esc(stageInfo(item.status).label)}</span></div>`
-        : `<div class="button-row"><button class="btn btn-success btn-sm" data-action="approve-approval" data-id="${esc(item.id)}">✓ Approve</button><button class="btn btn-secondary btn-sm" data-action="edit-approval" data-id="${esc(item.id)}">✎ Edit</button><button class="btn btn-danger btn-sm" data-action="skip-approval" data-id="${esc(item.id)}">✗ Skip</button></div>`;
+      const actions = ['approved', 'sent', 'skipped', 'rejected', 'error'].includes(item.status)
+        ? ''
+        : `<div class="button-row approval-actions"><button class="btn btn-success btn-sm" data-action="approve-approval" data-id="${esc(item.id)}">✓ Approve</button><button class="btn btn-secondary btn-sm" data-action="edit-approval" data-id="${esc(item.id)}">✎ Edit</button><button class="btn btn-danger btn-sm" data-action="skip-approval" data-id="${esc(item.id)}">✗ Skip</button></div>`;
       return (
-        `<article class="approval-card${faded}">` +
-          `<div class="approval-card-head"><div class="approval-type ${item.channel === 'linkedin_dm' ? 'approval-dm' : item.channel === 'email' ? 'approval-email' : 'approval-followup'}">${esc(item.channel === 'linkedin_dm' ? 'LINKEDIN DM' : item.channel === 'email' ? 'EMAIL' : item.channel.toUpperCase())}</div><div class="approval-meta">${esc(formatTime(item.created_at))} ${stageChip(item.status)}</div></div>` +
+        `<article class="approval-card${faded}" data-approval-id="${esc(item.id)}">` +
+          `<div class="approval-card-head"><div class="approval-type ${item.channel === 'linkedin_dm' ? 'approval-dm' : item.channel === 'email' ? 'approval-email' : 'approval-followup'}">${esc(item.channel === 'linkedin_dm' ? 'LINKEDIN DM' : item.channel === 'email' ? 'EMAIL' : item.channel.toUpperCase())}</div><div class="approval-meta">${esc(formatTime(item.created_at))} <span class="approval-status">${approvalStatusChip(item.status)}</span></div></div>` +
           `<div class="approval-person">${esc(item.candidates?.name || 'Unknown')}</div>` +
           `<div class="candidate-sub">${esc(item.candidates?.current_title || 'No title')} · ${esc(item.candidates?.current_company || 'No company')} · ${esc(item.jobs?.job_title || 'Unknown job')}</div>` +
           `<blockquote class="approval-message">${esc(item.message_text || '')}</blockquote>` +
@@ -998,6 +1054,8 @@
       groups[field.category].push(field);
       return groups;
     }, {});
+    const unipileFields = (groupedConfig.Unipile || []).filter((field) => field.key.startsWith('UNIPILE_'));
+    delete groupedConfig.Unipile;
 
     return (
       '<section class="view-section">' +
@@ -1017,7 +1075,17 @@
           `<div class="snapshot-card"><div class="candidate-sub">Pending</div><strong>${esc((executionQueue.pending || []).map((item) => item.job_title).join(', ') || 'None')}</strong></div>` +
         '</div></div>' +
         '<div class="surface"><div class="section-head"><div><div class="label-caps">API Health</div><h2 class="section-title">Integration Status</h2></div><button class="btn btn-secondary btn-sm" data-action="refresh-health">Refresh</button></div><div class="health-grid">' + (integrationHealth.statuses || []).map((item) => `<div class="health-card"><div class="health-head"><span class="health-dot ${esc(item.status)}"></span><strong>${esc(item.name)}</strong></div><div class="candidate-sub">${esc(item.detail || '')}</div></div>`).join('') + '</div></div>' +
-        '<div class="surface"><div class="section-head"><div><div class="label-caps">Environment</div><h2 class="section-title">Runtime Config</h2></div></div><div class="view-section">' + Object.entries(groupedConfig).map(([category, fields]) => (
+        '<div class="surface"><div class="section-head"><div><div class="label-caps">Environment</div><h2 class="section-title">Runtime Config</h2></div></div><div class="view-section">' +
+        (unipileFields.length ? (
+          '<section class="config-group">' +
+            '<div><div class="label-caps">Unipile</div><h3 class="section-title small">Hot-Swap Credentials</h3><div class="candidate-sub">Save these live. Raxion will use the new Unipile account on the next API call.</div></div>' +
+            '<form id="unipile-credentials-form" class="config-grid">' +
+              unipileFields.map((field) => `<label class="config-card"><div class="config-head"><div><div class="label-caps">${esc(field.category)}</div><h3 class="section-title small">${esc(field.label)}</h3><div class="candidate-sub">${esc(field.key)} · live update</div></div></div><input class="input config-input${field.secret ? ' mono-text' : ''}" type="${esc(field.inputType || 'text')}" name="${esc(field.key)}" value="${esc(field.value || '')}" /></label>`).join('') +
+              '<div class="button-row"><button class="btn btn-primary btn-sm" type="submit">Save Credentials</button><button class="btn btn-secondary btn-sm" type="button" data-action="test-unipile-credentials">Test Connection</button></div>' +
+            '</form>' +
+          '</section>'
+        ) : '') +
+        Object.entries(groupedConfig).map(([category, fields]) => (
           '<section class="config-group">' +
             `<div><div class="label-caps">${esc(category)}</div><h3 class="section-title small">${esc(category)} Controls</h3></div>` +
             '<div class="config-grid">' +
@@ -1451,15 +1519,14 @@
 
     if (action === 'approve-approval') {
       await request(`/api/approval-queue/${id}/approve`, { method: 'POST' });
-      markApprovalLocally(id, 'approved');
+      removeApprovalActions(id, 'approved');
       render();
       return;
     }
 
     if (action === 'skip-approval') {
       await request(`/api/approval-queue/${id}/skip`, { method: 'POST' });
-      const target = state.approvals.find((item) => item.id === id);
-      if (target) target.status = 'rejected';
+      removeApprovalActions(id, 'skipped');
       render();
       return;
     }
@@ -1504,6 +1571,19 @@
       await loadCoreData();
       state.view = 'controls';
       render();
+      return;
+    }
+
+    if (action === 'test-unipile-credentials') {
+      const form = document.getElementById('unipile-credentials-form');
+      if (!form) return;
+      const payload = Object.fromEntries(new FormData(form).entries());
+      const result = await request('/api/environment/credentials/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      showToast(`Unipile connection OK - ${result.detail || 'credentials accepted'}.`, 'success');
       return;
     }
 
@@ -1760,6 +1840,20 @@
       state.view = 'controls';
       render();
     }
+
+    if (event.target.id === 'unipile-credentials-form') {
+      event.preventDefault();
+      const payload = Object.fromEntries(new FormData(event.target).entries());
+      await request('/api/environment/credentials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      showToast('Credentials updated - Raxion is now using the new account.', 'success');
+      await loadCoreData();
+      state.view = 'controls';
+      render();
+    }
   });
 
   window.addEventListener('hashchange', () => {
@@ -1774,6 +1868,15 @@
       state.activity = [payload, ...(state.activity || [])].slice(0, 100);
       if (payload.job_id === state.selectedJobId) {
         state.selectedJobActivity = [payload, ...(state.selectedJobActivity || [])].slice(0, 200);
+      }
+      if (payload.event_type === 'APPROVAL_ACTIONED' && payload.detail?.approval_id) {
+        removeApprovalActions(payload.detail.approval_id, 'approved');
+      }
+      if (payload.event_type === 'MESSAGE_SENT' && payload.detail?.approval_id) {
+        removeApprovalActions(payload.detail.approval_id, 'sent');
+      }
+      if (payload.event_type === 'APPROVAL_SKIPPED' && payload.detail?.approval_id) {
+        removeApprovalActions(payload.detail.approval_id, 'skipped');
       }
       render();
     } catch {

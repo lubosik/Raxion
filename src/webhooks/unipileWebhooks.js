@@ -4,6 +4,7 @@ import { processIncomingMessage } from '../services/replyHandler.js';
 import { logActivity } from '../services/activityLogger.js';
 import { sendTelegramMessage, getRecruiterChatId } from '../integrations/telegram.js';
 import { getRuntimeConfigValue } from '../services/configService.js';
+import { getLiveCredential } from '../services/settings.js';
 
 export function createUnipileWebhookRouter() {
   const router = express.Router();
@@ -47,7 +48,7 @@ export function createUnipileWebhookRouter() {
     }
 
     if (payload.event === 'message_received') {
-      const linkedinAccountId = getRuntimeConfigValue('UNIPILE_LINKEDIN_ACCOUNT_ID');
+      const linkedinAccountId = await getLiveCredential('UNIPILE_LINKEDIN_ACCOUNT_ID');
       if (payload.account_id && payload.account_id !== linkedinAccountId) return;
       const senderId = payload.sender?.attendee_provider_id || payload.sender?.provider_id || null;
       const ownUserId = payload.account_info?.user_id || null;
@@ -59,7 +60,7 @@ export function createUnipileWebhookRouter() {
     }
 
     if (payload.event === 'mail_received') {
-      const emailAccountId = getRuntimeConfigValue('UNIPILE_EMAIL_ACCOUNT_ID');
+      const emailAccountId = await getLiveCredential('UNIPILE_EMAIL_ACCOUNT_ID');
       if (payload.account_id && emailAccountId && payload.account_id !== emailAccountId) return;
       const fromEmail = payload.from_attendee?.identifier || null;
       const ownReplyEmail = getRuntimeConfigValue('REPLY_TO_EMAIL') || null;
@@ -110,7 +111,13 @@ export function createUnipileWebhookRouter() {
       pipeline_stage: 'invite_accepted',
       invite_accepted_at: new Date().toISOString(),
     }).eq('id', candidate.id);
-    await logActivity(candidate.job_id, candidate.id, 'INVITE_ACCEPTED', `${candidate.name} accepted connection request`, payload);
+    await logActivity(
+      candidate.job_id,
+      candidate.id,
+      'INVITE_ACCEPTED',
+      `[${candidate.jobs?.job_title || 'Unknown job'}]: ${candidate.name} accepted connection request (${candidate.current_title || 'unknown title'} at ${candidate.current_company || 'unknown company'})`,
+      payload,
+    );
     await sendTelegramMessage(getRecruiterChatId(), `🤝 Connection accepted: ${candidate.name} at ${candidate.current_company || 'unknown firm'} - queued for DM draft`).catch(() => null);
   });
 

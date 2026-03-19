@@ -1,6 +1,7 @@
 import supabase from '../db/supabase.js';
 import { getRuntimeConfigValue } from './configService.js';
 import { getAccessToken } from '../integrations/zohoRecruit.js';
+import { getLiveCredential } from './settings.js';
 
 let cachedHealth = null;
 let cachedAt = 0;
@@ -48,9 +49,9 @@ async function checkClaude() {
   return okStatus('Claude', 'API key configured');
 }
 
-async function checkUnipile() {
-  const dsn = getRuntimeConfigValue('UNIPILE_DSN');
-  const apiKey = getRuntimeConfigValue('UNIPILE_API_KEY');
+export async function testUnipileConnection(credentials = {}) {
+  const dsn = credentials.UNIPILE_DSN || await getLiveCredential('UNIPILE_DSN');
+  const apiKey = credentials.UNIPILE_API_KEY || await getLiveCredential('UNIPILE_API_KEY');
   if (!dsn || !apiKey) return warnStatus('Unipile', 'Missing DSN or API key');
 
   try {
@@ -61,6 +62,10 @@ async function checkUnipile() {
   } catch (error) {
     return errorStatus('Unipile', error.message);
   }
+}
+
+async function checkUnipile() {
+  return testUnipileConnection();
 }
 
 async function checkApify() {

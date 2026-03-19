@@ -23,8 +23,8 @@ import { syncCandidateToATS } from '../integrations/zohoRecruit.js';
 import { generateInterviewBrief } from '../services/qualificationEngine.js';
 import { getRuntimeState, toggleRuntimeStateValue } from '../services/runtimeState.js';
 import { listRuntimeConfig, setRuntimeConfigValue, deleteRuntimeConfigValue } from '../services/configService.js';
-import { getIntegrationHealth } from '../services/healthService.js';
-import { getSetting, setSetting } from '../services/settings.js';
+import { getIntegrationHealth, testUnipileConnection } from '../services/healthService.js';
+import { getSetting, setSetting, invalidateCredentialCache } from '../services/settings.js';
 import { markConversationEnded } from '../services/conversationState.js';
 import { getExecutionQueueSnapshot } from '../services/jobExecutionQueue.js';
 import {
@@ -609,7 +609,7 @@ export function createDashboardServer() {
   });
 
   app.post('/api/candidates/:id/approve/:approvalId', async (req, res) => {
-    res.json(await approveQueuedMessage(req.params.approvalId));
+    res.json(await approveQueuedMessage(req.params.approvalId, 'A', { source: 'dashboard' }));
   });
 
   app.post('/api/candidates/:id/interview-brief', async (req, res) => {
@@ -644,9 +644,39 @@ export function createDashboardServer() {
     res.json((data || []).map((row) => ({ ...normalizeApprovalRecord(row), jobs: normalizeJobRecord(row.jobs) })));
   });
 
-  app.post('/api/approval-queue/:id/approve', async (req, res) => res.json(await approveQueuedMessage(req.params.id)));
+  app.post('/api/environment/credentials', async (req, res) => {
+    try {
+      const updates = [
+        'UNIPILE_DSN',
+        'UNIPILE_API_KEY',
+        'UNIPILE_LINKEDIN_ACCOUNT_ID',
+        'UNIPILE_EMAIL_ACCOUNT_ID',
+      ].filter((key) => req.body[key] !== undefined && req.body[key] !== '');
+
+      await Promise.all(updates.map((key) => setRuntimeConfigValue(key, req.body[key])));
+      invalidateCredentialCache();
+
+      res.json({ success: true, message: 'Credentials updated - active immediately on next API call.' });
+    } catch (error) {
+      res.status(400).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/environment/credentials/test', async (req, res) => {
+    try {
+      const status = await testUnipileConnection(req.body || {});
+      if (status.status === 'ok') {
+        return res.json({ success: true, detail: status.detail });
+      }
+      return res.status(400).json({ error: status.detail || 'Unipile connection failed' });
+    } catch (error) {
+      return res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/approval-queue/:id/approve', async (req, res) => res.json(await approveQueuedMessage(req.params.id, 'A', { source: 'dashboard' })));
   app.post('/api/approval-queue/:id/edit', async (req, res) => res.json(await editQueuedMessage(req.params.id, req.body.message_text)));
-  app.post('/api/approval-queue/:id/skip', async (req, res) => res.json(await skipQueuedMessage(req.params.id)));
+  app.post('/api/approval-queue/:id/skip', async (req, res) => res.json(await skipQueuedMessage(req.params.id, { source: 'dashboard' })));
 
   app.get('/api/activity/stream', (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');

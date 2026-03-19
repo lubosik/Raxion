@@ -1,6 +1,17 @@
 import supabase from '../db/supabase.js';
 import { logError } from '../lib_errors.js';
 
+const RUNTIME_ENV_PREFIX = 'runtime_env:';
+const LIVE_CREDENTIAL_KEYS = [
+  'UNIPILE_DSN',
+  'UNIPILE_API_KEY',
+  'UNIPILE_LINKEDIN_ACCOUNT_ID',
+  'UNIPILE_EMAIL_ACCOUNT_ID',
+];
+
+let credentialCache = {};
+let cacheExpiry = 0;
+
 export async function getSetting(key, fallback = null) {
   try {
     const { data } = await supabase.from('raxion_settings').select('value').eq('key', key).maybeSingle();
@@ -18,4 +29,38 @@ export async function setSetting(key, value) {
     await logError('settings.setSetting', error, 'error');
     throw error;
   }
+}
+
+export async function getLiveCredential(key) {
+  if (!LIVE_CREDENTIAL_KEYS.includes(key)) {
+    return process.env[key] || null;
+  }
+
+  const now = Date.now();
+  if (now > cacheExpiry || credentialCache[key] == null) {
+    try {
+      const settingKeys = LIVE_CREDENTIAL_KEYS.map((item) => `${RUNTIME_ENV_PREFIX}${item}`);
+      const { data } = await supabase
+        .from('raxion_settings')
+        .select('key, value')
+        .in('key', settingKeys);
+
+      credentialCache = {};
+      for (const row of data || []) {
+        const rawKey = String(row.key || '').replace(RUNTIME_ENV_PREFIX, '');
+        if (row.value) credentialCache[rawKey] = row.value;
+      }
+      cacheExpiry = now + (30 * 1000);
+    } catch (error) {
+      await logError('settings.getLiveCredential', error, 'warn');
+      cacheExpiry = now + (5 * 1000);
+    }
+  }
+
+  return credentialCache[key] || process.env[key] || null;
+}
+
+export function invalidateCredentialCache() {
+  credentialCache = {};
+  cacheExpiry = 0;
 }

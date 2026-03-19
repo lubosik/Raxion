@@ -77,13 +77,13 @@ export function startTelegramBot() {
 
       if (message.text.startsWith('/brief')) return handleBriefCommand(chatId, message.text);
       if (message.text === '/status') return handleStatusCommand(chatId);
-      if (message.text.startsWith('/approve_')) return approveQueuedMessage(message.text.replace('/approve_', '').trim()).then(() => bot.sendMessage(chatId, 'Approved. If the sending window is open, Raxion will send it now.'));
+      if (message.text.startsWith('/approve_')) return approveQueuedMessage(message.text.replace('/approve_', '').trim(), 'A', { source: 'telegram' }).then(() => bot.sendMessage(chatId, 'Approved. If the sending window is open, Raxion will send it now.'));
       if (message.text.startsWith('/edit_')) {
         const [approvalId, ...rest] = message.text.replace('/edit_', '').trim().split(' ');
         await editQueuedMessage(approvalId, rest.join(' '));
         return bot.sendMessage(chatId, 'Approval message updated. Approve it from Telegram or Mission Control when ready.');
       }
-      if (message.text.startsWith('/skip_')) return skipQueuedMessage(message.text.replace('/skip_', '').trim()).then(() => bot.sendMessage(chatId, 'Skipped.'));
+      if (message.text.startsWith('/skip_')) return skipQueuedMessage(message.text.replace('/skip_', '').trim(), { source: 'telegram' }).then(() => bot.sendMessage(chatId, 'Skipped.'));
       if (message.text === '/pause') {
         await supabase.from('jobs').update(await prepareJobPayload({ paused: true, paused_until: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(), status: 'PAUSED' })).not('id', 'is', null);
         return bot.sendMessage(chatId, '⏸ Sequencer paused');
@@ -122,7 +122,7 @@ export function startTelegramBot() {
       if (payload.startsWith('approve_a_') || payload.startsWith('approve_b_')) {
         const approvalId = payload.replace('approve_a_', '').replace('approve_b_', '');
         const subjectVariant = payload.startsWith('approve_b_') ? 'B' : 'A';
-        const result = await approveQueuedMessage(approvalId, subjectVariant);
+        const result = await approveQueuedMessage(approvalId, subjectVariant, { source: 'telegram' });
         if (messageId) {
           await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
             chat_id: chatId,
@@ -146,7 +146,7 @@ export function startTelegramBot() {
 
       if (payload.startsWith('skip_')) {
         const approvalId = payload.replace('skip_', '');
-        const result = await skipQueuedMessage(approvalId);
+        const result = await skipQueuedMessage(approvalId, { source: 'telegram' });
         if (messageId) {
           await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
             chat_id: chatId,
@@ -187,7 +187,7 @@ export function startTelegramBot() {
       }
 
       if (action === 'approve') {
-        const result = await approveQueuedMessage(targetId);
+        const result = await approveQueuedMessage(targetId, 'A', { source: 'telegram' });
         if (messageId) {
           await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
             chat_id: chatId,
@@ -199,7 +199,7 @@ export function startTelegramBot() {
       }
 
       if (action === 'skip') {
-        const result = await skipQueuedMessage(targetId);
+        const result = await skipQueuedMessage(targetId, { source: 'telegram' });
         if (messageId) {
           await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
             chat_id: chatId,

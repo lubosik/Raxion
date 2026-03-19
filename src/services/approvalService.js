@@ -1,5 +1,10 @@
 import supabase from '../db/supabase.js';
-import { sendTelegramMessage, editTelegramMessage, getRecruiterChatId } from '../integrations/telegram.js';
+import {
+  sendTelegramMessage,
+  editTelegramMessage,
+  editTelegramReplyMarkup,
+  getRecruiterChatId,
+} from '../integrations/telegram.js';
 import { startLinkedInDM, sendLinkedInDM, sendEmail } from '../integrations/unipile.js';
 import { todayIsoDate } from '../lib_utils.js';
 import { logActivity } from './activityLogger.js';
@@ -28,6 +33,8 @@ const APPROVAL_CHANNEL_LABELS = {
   applicant_reply_email: 'Applicant Reply Email',
 };
 
+let candidateApprovalSkippedColumnSupported;
+
 function getPendingApprovalPipelineStage(channel) {
   if (['linkedin_dm', 'email'].includes(channel)) return 'pending_approval';
   return null;
@@ -46,6 +53,55 @@ function getRejectedPipelineStage(approval, candidate) {
   if (approval.stage === 'Applicant Reply Email') return candidate?.qualified_at ? 'Qualified' : 'Applied';
   if (approval.stage === 'Archived') return candidate?.last_reply_at ? 'reply_received' : candidate?.pipeline_stage || null;
   return candidate?.pipeline_stage === 'pending_approval' ? null : candidate?.pipeline_stage || null;
+}
+
+function getSentPipelineStage(channel, fallbackStage) {
+  if (channel === 'linkedin_dm') return 'dm_sent';
+  if (channel === 'email') return 'email_sent';
+  return fallbackStage || null;
+}
+
+function describeCandidate(candidate) {
+  const role = candidate?.current_title || 'unknown title';
+  const company = candidate?.current_company || 'unknown company';
+  return `${candidate?.name || 'Unknown candidate'} (${role} at ${company})`;
+}
+
+async function candidateSupportsApprovalSkippedFlag() {
+  if (candidateApprovalSkippedColumnSupported !== undefined) {
+    return candidateApprovalSkippedColumnSupported;
+  }
+
+  const { error } = await supabase.from('candidates').select('approval_skipped').limit(1);
+  candidateApprovalSkippedColumnSupported = !error;
+  return candidateApprovalSkippedColumnSupported;
+}
+
+async function updateCandidateAfterSkip(candidate, approval) {
+  const updates = {};
+  if (await candidateSupportsApprovalSkippedFlag()) {
+    updates.approval_skipped = true;
+  }
+  if (Object.keys(updates).length) {
+    await supabase.from('candidates').update(updates).eq('id', approval.candidate_id);
+  }
+}
+
+async function updateTelegramApprovalMessage(approval, newStatus, source = 'dashboard') {
+  const normalizedApproval = normalizeApprovalRecord(approval);
+  const messageId = normalizedApproval.telegram_message_id;
+  const chatId = getRecruiterChatId();
+  if (!messageId || !chatId) return;
+
+  const statusText = {
+    approved: source === 'dashboard' ? '✅ Approved via dashboard - queued to send' : '✅ Approved',
+    sent: '✅ Sent',
+    skipped: source === 'dashboard' ? '⏭ Skipped via dashboard' : '⏭ Skipped',
+  }[newStatus];
+
+  await editTelegramReplyMarkup(chatId, messageId, { inline_keyboard: [] }).catch(() => null);
+  if (!statusText) return;
+  await sendTelegramMessage(chatId, statusText, { reply_to_message_id: Number(messageId) }).catch(() => null);
 }
 
 export function validateDraftMessage(content, candidate) {
@@ -503,13 +559,14 @@ export async function resendMissingTelegramApprovalCards(limit = 25) {
   return resent;
 }
 
-export async function approveQueuedMessage(approvalId, subjectVariant = 'A') {
+export async function approveQueuedMessage(approvalId, subjectVariant = 'A', options = {}) {
+  const source = options.source || 'telegram';
   const { data: rawApproval } = await supabase.from('approval_queue').select('*').eq('id', approvalId).single();
   const approval = normalizeApprovalRecord(rawApproval);
   if (!approval || !['pending', 'edited'].includes(approval.status)) return null;
 
-  const { candidate } = await getApprovalContext(approval);
-  if (!candidate) return null;
+  const { candidate, job } = await getApprovalContext(approval);
+  if (!candidate || !job) return null;
 
   try {
     validateDraftMessage(approval.message_text, candidate);
@@ -538,23 +595,32 @@ export async function approveQueuedMessage(approvalId, subjectVariant = 'A') {
     }).eq('id', approval.candidate_id);
   }
 
-  await logActivity(approval.job_id, approval.candidate_id, 'MESSAGE_APPROVED', `Recruiter approved ${approval.channel}`, {
+  const normalizedUpdated = normalizeApprovalRecord(updated) || approval;
+  await logActivity(approval.job_id, approval.candidate_id, 'APPROVAL_ACTIONED', `[${job.job_title}]: ${describeCandidate(candidate)} - ${getApprovalChannelLabel(normalizedUpdated.message_type, normalizedUpdated.channel)} approved, queued to send`, {
+    approval_id: approvalId,
+    channel: approval.channel,
+    actioned_by: source,
+    subject_variant: subjectVariant,
+    status: 'approved',
+  });
+  await logActivity(approval.job_id, approval.candidate_id, 'MESSAGE_APPROVED', `[${job.job_title}]: ${describeCandidate(candidate)} - ${getApprovalChannelLabel(normalizedUpdated.message_type, normalizedUpdated.channel)} approved by ${source}`, {
     approval_id: approvalId,
     channel: approval.channel,
     subject_variant: subjectVariant,
+    source,
   });
-  const normalizedUpdated = normalizeApprovalRecord(updated) || approval;
   await syncApprovalTelegramCard(normalizedUpdated);
-
-  const { job } = await getApprovalContext(normalizedUpdated);
-  if (job) {
-    await executeApprovedSends(job);
+  if (source === 'dashboard') {
+    await updateTelegramApprovalMessage(normalizedUpdated, 'approved', source);
   }
+
+  await executeApprovedSends(job, { source });
 
   return normalizedUpdated;
 }
 
-export async function executeApprovedSends(job) {
+export async function executeApprovedSends(job, options = {}) {
+  const source = options.source || 'system';
   const { data: approvals } = await supabase
     .from('approval_queue')
     .select('*')
@@ -624,6 +690,12 @@ export async function executeApprovedSends(job) {
       }
       // eslint-disable-next-line no-await-in-loop
       await applyStageAfterSend(normalizedApproval, candidate, result);
+      const sentPipelineStage = getSentPipelineStage(normalizedApproval.channel, normalizedApproval.stage);
+      if (sentPipelineStage) {
+        await supabase.from('candidates').update({
+          pipeline_stage: sentPipelineStage,
+        }).eq('id', approval.candidate_id);
+      }
       // eslint-disable-next-line no-await-in-loop
       await incrementDailyLimit(normalizedApproval);
       // eslint-disable-next-line no-await-in-loop
@@ -634,10 +706,11 @@ export async function executeApprovedSends(job) {
       // eslint-disable-next-line no-await-in-loop
       await syncApprovalTelegramCard({ ...normalizedApproval, status: 'sent', sent_at: new Date().toISOString() });
       // eslint-disable-next-line no-await-in-loop
-      await logActivity(approval.job_id, approval.candidate_id, 'MESSAGE_SENT', `Sent ${normalizedApproval.channel} via Unipile`, {
+      await logActivity(approval.job_id, approval.candidate_id, 'MESSAGE_SENT', `[${job.job_title}]: ${describeCandidate(candidate)} - ${getApprovalChannelLabel(normalizedApproval.message_type, normalizedApproval.channel)} sent`, {
         approval_id: approval.id,
         channel: normalizedApproval.channel,
         sent_at: new Date().toISOString(),
+        source,
       });
       sentCount += 1;
     } catch (error) {
@@ -692,23 +765,31 @@ export async function editQueuedMessage(approvalId, messageText) {
   return normalizedApproval;
 }
 
-export async function skipQueuedMessage(approvalId) {
+export async function skipQueuedMessage(approvalId, options = {}) {
+  const source = options.source || 'telegram';
   const { data: rawExisting } = await supabase.from('approval_queue').select('*').eq('id', approvalId).single();
   const existing = normalizeApprovalRecord(rawExisting);
   if (!existing) return null;
 
-  const { candidate } = await getApprovalContext(existing);
-  const { data: approval } = await supabase.from('approval_queue').update(await prepareApprovalUpdatePayload({ status: 'rejected' })).eq('id', approvalId).select('*').single();
+  const { candidate, job } = await getApprovalContext(existing);
+  const { data: approval } = await supabase.from('approval_queue').update(await prepareApprovalUpdatePayload({ status: 'skipped' })).eq('id', approvalId).select('*').single();
   if (!approval) return null;
   const normalizedApproval = normalizeApprovalRecord(approval);
-  const rejectedPipelineStage = getRejectedPipelineStage(normalizedApproval, candidate);
-  if (rejectedPipelineStage) {
-    await supabase.from('candidates').update({
-      pipeline_stage: rejectedPipelineStage,
-    }).eq('id', normalizedApproval.candidate_id);
-  }
-  await logActivity(approval.job_id, approval.candidate_id, 'MESSAGE_SKIPPED', `Skipped queued ${normalizedApproval.channel} message`, { approval_id: approvalId });
+  await updateCandidateAfterSkip(candidate, normalizedApproval);
+  await logActivity(approval.job_id, approval.candidate_id, 'APPROVAL_SKIPPED', `[${job?.job_title || 'Unknown job'}]: ${describeCandidate(candidate)} - ${getApprovalChannelLabel(normalizedApproval.message_type, normalizedApproval.channel)} skipped`, {
+    approval_id: approvalId,
+    channel: normalizedApproval.channel,
+    source,
+    status: 'skipped',
+  });
+  await logActivity(approval.job_id, approval.candidate_id, 'MESSAGE_SKIPPED', `[${job?.job_title || 'Unknown job'}]: ${describeCandidate(candidate)} - queued ${normalizedApproval.channel} message skipped`, {
+    approval_id: approvalId,
+    source,
+  });
   await syncApprovalTelegramCard(normalizedApproval);
+  if (source === 'dashboard') {
+    await updateTelegramApprovalMessage(normalizedApproval, 'skipped', source);
+  }
   return normalizedApproval;
 }
 
