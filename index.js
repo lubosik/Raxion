@@ -72,7 +72,12 @@ async function bootstrap() {
     await testSupabase();
     await ensureSchemaReady();
     await hydrateRuntimeConfig();
-    await recreateAllWebhooks();
+    try {
+      await recreateAllWebhooks();
+    } catch (error) {
+      await logError('index.recreateAllWebhooks', error, 'error');
+      console.error('[WEBHOOK] startup recreation failed', error);
+    }
     startTelegramBot();
     startInboxMonitor();
     registerCronJobs();
