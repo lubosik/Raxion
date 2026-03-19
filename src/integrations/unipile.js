@@ -3,7 +3,7 @@ import { getRuntimeConfigValue } from '../services/configService.js';
 import { getLiveCredential } from '../services/settings.js';
 
 async function getBaseUrl() {
-  const dsn = await getLiveCredential('UNIPILE_DSN');
+  const dsn = String(await getLiveCredential('UNIPILE_DSN') || '').trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
   return dsn ? `https://${dsn}/api/v1` : null;
 }
 

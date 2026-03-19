@@ -669,6 +669,7 @@ export function createDashboardServer() {
         getLiveCredential('UNIPILE_EMAIL_ACCOUNT_ID'),
         getLiveCredential('UNIPILE_DSN'),
       ]);
+      const normalizedDsn = String(dsn || '').trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
 
       res.json({
         success: true,
@@ -677,7 +678,7 @@ export function createDashboardServer() {
           linkedin: linkedinAccountId || null,
           email: emailAccountId || null,
         },
-        base_url: dsn ? `https://${dsn}/api/v1` : null,
+        base_url: normalizedDsn ? `https://${normalizedDsn}/api/v1` : null,
       });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });

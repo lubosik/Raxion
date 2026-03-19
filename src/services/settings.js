@@ -50,10 +50,12 @@ export async function getLiveCredential(key) {
         .in('key', settingKeys);
 
       credentialCache = {};
-      for (const row of data || []) {
-        const rawKey = String(row.key || '').replace(RUNTIME_ENV_PREFIX, '');
-        if (!row.value || credentialCache[rawKey]) continue;
-        credentialCache[rawKey] = row.value;
+      const rows = data || [];
+      for (const liveKey of LIVE_CREDENTIAL_KEYS) {
+        const plain = rows.find((row) => row.key === liveKey && row.value);
+        const runtime = rows.find((row) => row.key === `${RUNTIME_ENV_PREFIX}${liveKey}` && row.value);
+        const chosen = plain?.value || runtime?.value || null;
+        if (chosen) credentialCache[liveKey] = chosen;
       }
       cacheExpiry = now + (30 * 1000);
     } catch (error) {
@@ -70,7 +72,9 @@ export async function setLiveCredential(key, value) {
     throw new Error(`Unknown live credential key: ${key}`);
   }
 
-  const stringValue = String(value ?? '');
+  const stringValue = key === 'UNIPILE_DSN'
+    ? String(value ?? '').trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '')
+    : String(value ?? '');
   const updatedAt = new Date().toISOString();
 
   try {

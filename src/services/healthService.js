@@ -50,7 +50,7 @@ async function checkClaude() {
 }
 
 export async function testUnipileConnection(credentials = {}) {
-  const dsn = credentials.UNIPILE_DSN || await getLiveCredential('UNIPILE_DSN');
+  const dsn = String(credentials.UNIPILE_DSN || await getLiveCredential('UNIPILE_DSN') || '').trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
   const apiKey = credentials.UNIPILE_API_KEY || await getLiveCredential('UNIPILE_API_KEY');
   if (!dsn || !apiKey) return warnStatus('Unipile', 'Missing DSN or API key');
 
