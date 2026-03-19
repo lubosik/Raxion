@@ -1061,8 +1061,15 @@
     delete groupedConfig.Unipile;
     const webhookItems = state.webhooks?.webhooks || [];
     const webhookAccounts = state.webhooks?.accounts || {};
-    const linkedinWebhook = webhookItems.find((item) => item.account_id === webhookAccounts.linkedin);
-    const emailWebhook = webhookItems.find((item) => item.account_id === webhookAccounts.email);
+    const accountMatches = (item, accountId) => {
+      if (!accountId) return false;
+      if (item.account_id === accountId) return true;
+      return (item.account_ids || []).some((account) => (account?.id || account) === accountId);
+    };
+    const linkedinWebhooks = webhookItems.filter((item) => accountMatches(item, webhookAccounts.linkedin));
+    const emailWebhooks = webhookItems.filter((item) => accountMatches(item, webhookAccounts.email));
+    const linkedinWebhook = linkedinWebhooks[0] || null;
+    const emailWebhook = emailWebhooks[0] || null;
     const linkedinWebhookUrl = linkedinWebhook?.url || linkedinWebhook?.request_url || '—';
     const emailWebhookUrl = emailWebhook?.url || emailWebhook?.request_url || '—';
 
@@ -1097,8 +1104,8 @@
         '<section class="config-group">' +
           '<div><div class="label-caps">Webhooks</div><h3 class="section-title small">Webhook Manager</h3><div class="candidate-sub">Deletes all existing Unipile webhooks and recreates LinkedIn and Email listeners for the current live credentials.</div></div>' +
           '<div class="config-grid">' +
-            `<div class="config-card"><div class="config-head"><div><div class="label-caps">LinkedIn</div><h3 class="section-title small">${linkedinWebhook ? 'Active' : 'None'}</h3><div class="candidate-sub">${esc(webhookAccounts.linkedin || 'No account configured')}</div></div></div><div class="candidate-sub">${linkedinWebhook ? '● Active' : '○ None'}</div><div class="candidate-sub mono-text">${esc(linkedinWebhookUrl)}</div></div>` +
-            `<div class="config-card"><div class="config-head"><div><div class="label-caps">Email</div><h3 class="section-title small">${emailWebhook ? 'Active' : 'None'}</h3><div class="candidate-sub">${esc(webhookAccounts.email || 'No account configured')}</div></div></div><div class="candidate-sub">${emailWebhook ? '● Active' : '○ None'}</div><div class="candidate-sub mono-text">${esc(emailWebhookUrl)}</div></div>` +
+            `<div class="config-card"><div class="config-head"><div><div class="label-caps">LinkedIn</div><h3 class="section-title small">${linkedinWebhooks.length ? 'Active' : 'None'}</h3><div class="candidate-sub">${esc(webhookAccounts.linkedin || 'No account configured')}</div></div></div><div class="candidate-sub">${linkedinWebhooks.length ? `● Active · ${linkedinWebhooks.length} webhook${linkedinWebhooks.length === 1 ? '' : 's'}` : '○ None'}</div><div class="candidate-sub mono-text">${esc(linkedinWebhookUrl)}</div></div>` +
+            `<div class="config-card"><div class="config-head"><div><div class="label-caps">Email</div><h3 class="section-title small">${emailWebhooks.length ? 'Active' : 'None'}</h3><div class="candidate-sub">${esc(webhookAccounts.email || 'No account configured')}</div></div></div><div class="candidate-sub">${emailWebhooks.length ? `● Active · ${emailWebhooks.length} webhook${emailWebhooks.length === 1 ? '' : 's'}` : '○ None'}</div><div class="candidate-sub mono-text">${esc(emailWebhookUrl)}</div></div>` +
             '<div class="config-card"><div class="config-head"><div><div class="label-caps">Actions</div><h3 class="section-title small">Recreate Webhooks</h3><div class="candidate-sub">Deletes all existing webhooks and creates fresh subscriptions pointing at `/webhooks/unipile/messages`.</div></div></div><div class="button-row"><button class="btn btn-primary btn-sm" type="button" data-action="recreate-webhooks" id="recreate-webhooks-btn">↻ Recreate Webhooks</button></div></div>' +
           '</div>' +
         '</section>' +

@@ -485,30 +485,59 @@ export async function recreateAllWebhooks() {
   }
 
   let linkedinResult = null;
+  let linkedinRelationsResult = null;
   let emailResult = null;
 
   if (linkedinAccountId) {
     linkedinResult = await request('/webhooks', {
       method: 'POST',
       body: {
-        account_id: linkedinAccountId,
-        url: `${serverBaseUrl}/webhooks/unipile/messages`,
-        events: ['message.created', 'relation.created', 'invitation.accepted'],
+        name: 'Raxion Messaging',
+        source: 'messaging',
+        request_url: `${serverBaseUrl}/webhooks/unipile/messages`,
+        format: 'json',
+        enabled: true,
+        account_ids: [linkedinAccountId],
+        events: ['message_received'],
+        headers: [{ key: 'Content-Type', value: 'application/json' }],
       },
     });
     if (!linkedinResult) {
       throw new Error('Failed to create LinkedIn webhook');
     }
     console.log('[WEBHOOK] LinkedIn webhook created:', extractWebhookId(linkedinResult) || linkedinResult);
+
+    linkedinRelationsResult = await request('/webhooks', {
+      method: 'POST',
+      body: {
+        name: 'Raxion Relations',
+        source: 'users',
+        request_url: `${serverBaseUrl}/webhooks/unipile/messages`,
+        format: 'json',
+        enabled: true,
+        account_ids: [linkedinAccountId],
+        events: ['new_relation'],
+        headers: [{ key: 'Content-Type', value: 'application/json' }],
+      },
+    });
+    if (!linkedinRelationsResult) {
+      throw new Error('Failed to create LinkedIn relations webhook');
+    }
+    console.log('[WEBHOOK] LinkedIn relations webhook created:', extractWebhookId(linkedinRelationsResult) || linkedinRelationsResult);
   }
 
   if (emailAccountId) {
     emailResult = await request('/webhooks', {
       method: 'POST',
       body: {
-        account_id: emailAccountId,
-        url: `${serverBaseUrl}/webhooks/unipile/messages`,
-        events: ['email.new', 'email.replied'],
+        name: 'Raxion Email',
+        source: 'email',
+        request_url: `${serverBaseUrl}/webhooks/unipile/messages`,
+        format: 'json',
+        enabled: true,
+        account_ids: [emailAccountId],
+        events: ['mail_received'],
+        headers: [{ key: 'Content-Type', value: 'application/json' }],
       },
     });
     if (!emailResult) {
@@ -519,6 +548,7 @@ export async function recreateAllWebhooks() {
 
   return {
     linkedin: linkedinResult,
+    linkedin_relations: linkedinRelationsResult,
     email: emailResult,
   };
 }
